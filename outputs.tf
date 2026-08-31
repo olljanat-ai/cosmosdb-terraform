@@ -33,13 +33,9 @@ output "database_users" {
   sensitive   = true
   value = {
     for name, user in azurerm_cosmosdb_mongo_user_definition.this : name => {
-      username = user.username
-      password = local.passwords[name]
-      connection_string = join("", [
-        "mongodb://${local.uri_escaped_usernames[name]}:${local.uri_escaped_passwords[name]}@${local.mongodb_host}:10255/${name}",
-        "?ssl=true&replicaSet=globaldb&retrywrites=false&maxIdleTimeMS=120000",
-        "&authMechanism=SCRAM-SHA-256&authSource=${name}&appName=@${azurerm_cosmosdb_account.this.name}@",
-      ])
+      username          = user.username
+      password          = local.passwords[name]
+      connection_string = local.connection_strings[name]
     }
   }
 }
@@ -64,4 +60,29 @@ output "primary_mongodb_connection_string" {
   description = "Account level MongoDB connection string. It carries the account key and grants access to every database, prefer the per-database users."
   sensitive   = true
   value       = azurerm_cosmosdb_account.this.primary_mongodb_connection_string
+}
+
+output "key_vault_id" {
+  description = "Resource ID of the Key Vault holding the database secrets, null when `key_vault_enabled` is false."
+  value       = one(azurerm_key_vault.this[*].id)
+}
+
+output "key_vault_name" {
+  description = "Name of the Key Vault, null when `key_vault_enabled` is false."
+  value       = one(azurerm_key_vault.this[*].name)
+}
+
+output "key_vault_uri" {
+  description = "URI of the Key Vault, for example `https://<vault>.vault.azure.net/`. Null when `key_vault_enabled` is false."
+  value       = one(azurerm_key_vault.this[*].vault_uri)
+}
+
+output "key_vault_secret_names" {
+  description = "Name of the password and connection string secret of every database that has a user of its own, keyed by database name."
+  value = {
+    for name, secret in azurerm_key_vault_secret.database_password : name => {
+      password          = secret.name
+      connection_string = azurerm_key_vault_secret.database_connection_string[name].name
+    }
+  }
 }
