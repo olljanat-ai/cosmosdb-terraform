@@ -1,13 +1,35 @@
+provider "azurerm" {
+  features {}
+}
+
 locals {
   # `databases` is a list for convenience, but resources are keyed by database name
   # so that reordering the list does not recreate anything.
   databases = { for db in var.databases : db.name => db }
 
-  users = var.create_database_users ? local.databases : {}
+  # Databases that get an owner of their own. The rest are reached through Entra ID.
+  users = { for name, db in local.databases : name => db if db.create_user }
 
-  entra_id_access = {
-    for a in var.entra_id_access : "${a.principal_id}|${a.role_definition_name}" => a
-  }
+  identities = { for i in var.entra_id_identities : i.name => i }
+
+  # Identities created here and principals that already exist end up in the same
+  # set of role assignments. Keys stay known at plan time, values do not have to be.
+  role_assignments = merge(
+    {
+      for name, identity in local.identities : "identity/${name}" => {
+        principal_id         = azurerm_user_assigned_identity.this[name].principal_id
+        role_definition_name = identity.role_definition_name
+        principal_type       = "ServicePrincipal"
+      }
+    },
+    {
+      for a in var.entra_id_access : "principal/${a.principal_id}|${a.role_definition_name}" => {
+        principal_id         = a.principal_id
+        role_definition_name = a.role_definition_name
+        principal_type       = a.principal_type
+      }
+    },
+  )
 
   capabilities = distinct(concat(
     ["EnableMongo"],
@@ -24,7 +46,7 @@ locals {
     name => db.password != null ? db.password : random_password.this[name].result
   }
 
-  mongodb_host = "${var.name}.mongo.cosmos.azure.com"
+  mongodb_host = "${var.cosmosdb_account_name}.mongo.cosmos.azure.com"
 
   # `urlencode` renders a space as "+", which a MongoDB driver reads literally
   # in the userinfo part of a connection string. Everything else it emits is
@@ -40,10 +62,17 @@ locals {
   }
 }
 
+resource "azurerm_resource_group" "this" {
+  name     = var.resource_group_name
+  location = var.location
+  tags     = var.tags
+}
+
+# One account for the whole environment. Every database below lives in it.
 resource "azurerm_cosmosdb_account" "this" {
-  name                = var.name
-  resource_group_name = var.resource_group_name
-  location            = var.location
+  name                = var.cosmosdb_account_name
+  resource_group_name = azurerm_resource_group.this.name
+  location            = azurerm_resource_group.this.location
   offer_type          = "Standard"
   kind                = "MongoDB"
 
@@ -80,8 +109,8 @@ resource "azurerm_cosmosdb_account" "this" {
 
   lifecycle {
     precondition {
-      condition     = var.mongo_rbac_enabled || !var.create_database_users
-      error_message = "`create_database_users` requires `mongo_rbac_enabled` to be true, per-database users are a Mongo RBAC feature."
+      condition     = var.mongo_rbac_enabled || length(local.users) == 0
+      error_message = "Databases with `create_user = true` require `mongo_rbac_enabled` to be true, per-database users are a Mongo RBAC feature."
     }
   }
 }
@@ -128,10 +157,19 @@ resource "azurerm_cosmosdb_mongo_user_definition" "this" {
   inherited_role_names     = each.value.role_names
 }
 
+resource "azurerm_user_assigned_identity" "this" {
+  for_each = local.identities
+
+  name                = each.value.name
+  resource_group_name = azurerm_resource_group.this.name
+  location            = azurerm_resource_group.this.location
+  tags                = var.tags
+}
+
 # Entra ID principals authenticate with their own token and read the account
 # connection string through the control plane instead of holding a password.
 resource "azurerm_role_assignment" "entra_id" {
-  for_each = local.entra_id_access
+  for_each = local.role_assignments
 
   scope                = azurerm_cosmosdb_account.this.id
   role_definition_name = each.value.role_definition_name
