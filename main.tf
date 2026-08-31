@@ -25,6 +25,19 @@ locals {
   }
 
   mongodb_host = "${var.name}.mongo.cosmos.azure.com"
+
+  # `urlencode` renders a space as "+", which a MongoDB driver reads literally
+  # in the userinfo part of a connection string. Everything else it emits is
+  # already correct percent encoding, and a literal "+" comes back as "%2B",
+  # so a plain replace is unambiguous.
+  uri_escaped_usernames = {
+    for name, db in local.users :
+    name => replace(urlencode(coalesce(db.username, db.name)), "+", "%20")
+  }
+
+  uri_escaped_passwords = {
+    for name, password in local.passwords : name => replace(urlencode(password), "+", "%20")
+  }
 }
 
 resource "azurerm_cosmosdb_account" "this" {
