@@ -58,6 +58,16 @@ entra_id_identities = [
 #   },
 # ]
 
+# Periodic backup, which is what a prototype wants: the module defaults to
+# continuous backup with 30 days of retention, and moving an account from
+# periodic to continuous is a one-way trip in Azure.
+backup = {
+  type                = "Periodic"
+  interval_in_minutes = 240
+  retention_in_hours  = 8
+  storage_redundancy  = "Local"
+}
+
 # Key Vault for the generated database passwords and the connection strings built
 # from them. The name is part of a public DNS name and has to be globally unique
 # too, so change it along with the account name.
@@ -80,6 +90,10 @@ key_vault_grant_deployer_access = true
 #     principal_type = "ServicePrincipal"
 #   },
 # ]
+
+# The Azure Verified Modules send anonymous deployment telemetry by default.
+# Set this to false to opt out.
+enable_telemetry = true
 
 tags = {
   environment = "prototype"
