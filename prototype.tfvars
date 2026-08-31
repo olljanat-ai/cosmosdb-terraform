@@ -58,6 +58,29 @@ entra_id_identities = [
 #   },
 # ]
 
+# Key Vault for the generated database passwords and the connection strings built
+# from them. The name is part of a public DNS name and has to be globally unique
+# too, so change it along with the account name.
+key_vault_name = "kv-cosmosdb-prototype"
+
+# Off, so that `terraform destroy` really releases the name of a prototype vault.
+# Turn it on for anything that is not a prototype.
+key_vault_purge_protection_enabled = false
+
+# Whoever runs the apply gets `Key Vault Secrets Officer` on the vault, which is
+# what lets Terraform write the secrets in the first place.
+key_vault_grant_deployer_access = true
+
+# Principals that read the secrets back. Reading one secret means reading them
+# all, so this is not the same thing as reaching a single database.
+#
+# key_vault_secrets_access = [
+#   {
+#     principal_id   = "00000000-0000-0000-0000-000000000000"
+#     principal_type = "ServicePrincipal"
+#   },
+# ]
+
 tags = {
   environment = "prototype"
   managed_by  = "terraform"

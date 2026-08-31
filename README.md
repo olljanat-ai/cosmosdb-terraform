@@ -6,9 +6,9 @@ one flat folder, with `prototype.tfvars` holding the values of the prototype
 environment.
 
 ```
-main.tf            resource group, Cosmos DB account, databases, users, identities
+main.tf            resource group, Cosmos DB account, databases, users, identities, Key Vault
 variables.tf       inputs
-outputs.tf         connection strings, identity client IDs, resource IDs
+outputs.tf         connection strings, identity client IDs, secret names, resource IDs
 versions.tf        Terraform and provider constraints
 prototype.tfvars   the prototype environment
 ```
@@ -42,7 +42,8 @@ prototype covers three different types of database side by side:
 | `telemetry` | account default      | no user at all, Entra ID identities only     |
 
 Plus two user assigned managed identities, `-app` with read-write access and
-`-reporting` with read-only access to the account.
+`-reporting` with read-only access to the account, and a Key Vault holding the
+generated passwords.
 
 ## The two ways in
 
@@ -105,11 +106,54 @@ Data plane Entra ID authentication for MongoDB is available on the vCore
 deployment model, which is a different service with no Mongo RBAC user
 definitions and is out of scope here.
 
+## Key Vault
+
+Every generated password, and the connection string built from it, is written
+into a Key Vault created next to the account, so that an application reads its
+credentials from the vault instead of from a Terraform output:
+
+```shell
+az keyvault secret show --vault-name "$(terraform output -raw key_vault_name)" \
+  --name orders-connection-string --query value -o tsv
+```
+
+Two secrets per database that has a user of its own, named after the database:
+
+| Secret                       | Contents                                     |
+| ---------------------------- | -------------------------------------------- |
+| `<database>-password`        | Password of that database's owner            |
+| `<database>-connection-string` | Full MongoDB connection string for that database |
+
+Passwords supplied through `databases[*].password` are written too, so the vault
+is the one place to look either way. Set `key_vault_enabled = false` to skip the
+vault entirely, and `key_vault_store_account_connection_string = true` to add the
+account level connection string as `cosmosdb-primary-connection-string`.
+
+The vault uses Azure RBAC rather than access policies. Terraform writes the
+secrets over the data plane, so the identity running the apply needs a role on
+the vault itself: `key_vault_grant_deployer_access` assigns it `Key Vault Secrets
+Officer`, and the apply then waits `key_vault_rbac_propagation_delay` for that
+assignment to reach the data plane before writing the first secret. Turn the
+grant off when that identity already holds the role higher up in the hierarchy.
+
+Principals in `key_vault_secrets_access` get `Key Vault Secrets User`, which is
+read access to the values. **That role is scoped to the vault, not to a single
+secret**, so anyone listed there reads every database password in it. The
+per-database isolation the Mongo RBAC users give you ends at the vault boundary;
+grant this the way you would grant the account keys. It is also why the account
+level connection string is not stored by default.
+
+Destroying the vault leaves it soft deleted for
+`key_vault_soft_delete_retention_days`, and the name stays reserved for that
+long. With `key_vault_purge_protection_enabled = true` it cannot be purged early
+at all, and the setting cannot be turned off again once enabled.
+
 ## Secrets in state
 
-Generated passwords and the account keys are stored in the Terraform state. Use
-an encrypted remote backend, or hand passwords in through
-`databases[*].password` from a secret store you already trust.
+Generated passwords and the account keys are stored in the Terraform state, the
+Key Vault does not change that. Use an encrypted remote backend, or hand
+passwords in through `databases[*].password` from a secret store you already
+trust.
 
 The `primary_mongodb_connection_string` output carries the account key, which
 bypasses the per-database users and reaches everything. Treat it as a break
@@ -125,6 +169,16 @@ glass credential.
 | `databases` | Databases to create, see below | `list(object)` | `[]` |
 | `entra_id_identities` | Managed identities to create and grant access to | `list(object)` | `[]` |
 | `entra_id_access` | Existing Entra ID principals to grant access to | `list(object)` | `[]` |
+| `key_vault_enabled` | Create a Key Vault and write the secrets into it | `bool` | `true` |
+| `key_vault_name` | Name of the Key Vault, globally unique | `string` | `null`, derived from the account name |
+| `key_vault_sku_name` | SKU of the Key Vault | `string` | `"standard"` |
+| `key_vault_soft_delete_retention_days` | Days a deleted vault or secret stays recoverable | `number` | `7` |
+| `key_vault_purge_protection_enabled` | Enable purge protection, cannot be undone | `bool` | `false` |
+| `key_vault_public_network_access_enabled` | Allow public network access to the vault | `bool` | `true` |
+| `key_vault_grant_deployer_access` | Assign `Key Vault Secrets Officer` to the identity running Terraform | `bool` | `true` |
+| `key_vault_rbac_propagation_delay` | Wait after that assignment before writing secrets | `string` | `"60s"` |
+| `key_vault_secrets_access` | Principals granted read access to the secret values | `list(object)` | `[]` |
+| `key_vault_store_account_connection_string` | Also store the account level connection string | `bool` | `false` |
 | `mongo_rbac_enabled` | Enable the Mongo RBAC capability | `bool` | `true` |
 | `mongo_server_version` | MongoDB server version | `string` | `"7.0"` |
 | `additional_capabilities` | Extra Cosmos DB capabilities | `list(string)` | `[]` |
@@ -167,8 +221,17 @@ A `databases` entry:
 | `database_users` | Username, password and connection string per database, sensitive |
 | `entra_id_identities` | Client ID, principal ID and role per created identity |
 | `entra_id_role_assignment_ids` | Resource ID per role assignment |
+| `key_vault_id` | Resource ID of the Key Vault |
+| `key_vault_name` | Name of the Key Vault |
+| `key_vault_uri` | URI of the Key Vault |
+| `key_vault_secret_names` | Password and connection string secret name per database |
 | `primary_mongodb_connection_string` | Account level connection string, sensitive |
 
 ## Requirements
 
-Terraform >= 1.3, `hashicorp/azurerm` >= 4.0, `hashicorp/random` >= 3.5.
+Terraform >= 1.3, `hashicorp/azurerm` >= 5.0, `hashicorp/random` >= 3.5,
+`hashicorp/time` >= 0.9.
+
+The azurerm floor is 5.0 because the Key Vault is configured with
+`rbac_authorization_enabled`, which replaced `enable_rbac_authorization` in that
+major version.
