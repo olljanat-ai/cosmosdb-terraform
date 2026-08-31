@@ -31,7 +31,7 @@ output "database_users" {
       username = user.username
       password = local.passwords[name]
       connection_string = join("", [
-        "mongodb://${urlencode(user.username)}:${urlencode(local.passwords[name])}@${local.mongodb_host}:10255/${name}",
+        "mongodb://${local.uri_escaped_usernames[name]}:${local.uri_escaped_passwords[name]}@${local.mongodb_host}:10255/${name}",
         "?ssl=true&replicaSet=globaldb&retrywrites=false&maxIdleTimeMS=120000",
         "&authMechanism=SCRAM-SHA-256&authSource=${name}&appName=@${azurerm_cosmosdb_account.this.name}@",
       ])
