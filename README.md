@@ -1,12 +1,13 @@
 # cosmosdb-terraform
 
 Terraform configuration for a single Azure Cosmos DB account with the MongoDB
-API and the test databases that live in it. Everything is in the root module,
-one flat folder, with `prototype.tfvars` holding the values of the prototype
-environment.
+API and the test databases that live in it. The infrastructure comes from the
+[Azure Verified Modules](https://azure.github.io/Azure-Verified-Modules/), wired
+together in the root module, one flat folder, with `prototype.tfvars` holding the
+values of the prototype environment.
 
 ```
-main.tf            resource group, Cosmos DB account, databases, users, identities, Key Vault
+main.tf            module calls, users, generated passwords, connection strings
 variables.tf       inputs
 outputs.tf         connection strings, identity client IDs, secret names, resource IDs
 versions.tf        Terraform and provider constraints
@@ -44,6 +45,31 @@ prototype covers three different types of database side by side:
 Plus two user assigned managed identities, `-app` with read-write access and
 `-reporting` with read-only access to the account, and a Key Vault holding the
 generated passwords.
+
+## Modules
+
+Every Azure resource except the Mongo RBAC users comes from an Azure Verified
+Module, pinned to an exact version:
+
+| Module | Version | What it creates |
+| --- | --- | --- |
+| [`avm-res-resources-resourcegroup`](https://registry.terraform.io/modules/Azure/avm-res-resources-resourcegroup/azurerm) | 0.4.0 | The resource group |
+| [`avm-res-documentdb-databaseaccount`](https://registry.terraform.io/modules/Azure/avm-res-documentdb-databaseaccount/azurerm) | 0.10.0 | The Cosmos DB account, the MongoDB databases and the role assignments on the account |
+| [`avm-res-managedidentity-userassignedidentity`](https://registry.terraform.io/modules/Azure/avm-res-managedidentity-userassignedidentity/azurerm) | 0.5.2 | One user assigned managed identity per `entra_id_identities` entry |
+| [`avm-res-keyvault-vault`](https://registry.terraform.io/modules/Azure/avm-res-keyvault-vault/azurerm) | 0.11.0 | The Key Vault, its role assignments and the secrets |
+
+Two things stay plain resources in `main.tf`, because no Azure Verified Module
+covers them: `random_password`, and `azurerm_cosmosdb_mongo_user_definition` for
+the per-database users. The Cosmos DB module does not manage Mongo RBAC user
+definitions, so they hang off the database IDs it hands back.
+
+The account API follows the databases: the Cosmos DB module creates a MongoDB
+account when `mongo_databases` is not empty and a NoSQL one when it is, which is
+why `databases` has to hold at least one entry.
+
+The modules collect anonymous deployment telemetry by default, one
+`Microsoft.Resources/deployments` per module and no customer data. Set
+`enable_telemetry = false` to opt out.
 
 ## The two ways in
 
@@ -132,7 +158,7 @@ account level connection string as `cosmosdb-primary-connection-string`.
 The vault uses Azure RBAC rather than access policies. Terraform writes the
 secrets over the data plane, so the identity running the apply needs a role on
 the vault itself: `key_vault_grant_deployer_access` assigns it `Key Vault Secrets
-Officer`, and the apply then waits `key_vault_rbac_propagation_delay` for that
+Officer`, and the module then waits `key_vault_rbac_propagation_delay` for that
 assignment to reach the data plane before writing the first secret. Turn the
 grant off when that identity already holds the role higher up in the hierarchy.
 
@@ -166,7 +192,7 @@ glass credential.
 | `resource_group_name` | Resource group holding the environment | `string` | required |
 | `location` | Azure region | `string` | required |
 | `cosmosdb_account_name` | Cosmos DB account name, globally unique | `string` | required |
-| `databases` | Databases to create, see below | `list(object)` | `[]` |
+| `databases` | Databases to create, see below. At least one is required | `list(object)` | `[]` |
 | `entra_id_identities` | Managed identities to create and grant access to | `list(object)` | `[]` |
 | `entra_id_access` | Existing Entra ID principals to grant access to | `list(object)` | `[]` |
 | `key_vault_enabled` | Create a Key Vault and write the secrets into it | `bool` | `true` |
@@ -190,6 +216,8 @@ glass credential.
 | `automatic_failover_enabled` | Enable automatic failover | `bool` | `null`, true when replicated |
 | `public_network_access_enabled` | Allow public network access | `bool` | `true` |
 | `ip_range_filter` | Allowed client IPs or CIDR ranges | `list(string)` | `[]` |
+| `backup` | Backup policy of the account, see below | `object` | continuous, 30 days |
+| `enable_telemetry` | Send the anonymous module telemetry | `bool` | `true` |
 | `tags` | Tags applied to every resource | `map(string)` | `{}` |
 
 A `databases` entry:
@@ -208,6 +236,23 @@ A `databases` entry:
 `role_names` accepts the Mongo built-in roles `read`, `readWrite`, `dbAdmin` and
 `dbOwner`, and any custom role that exists in the same database.
 
+`backup` is passed to the Cosmos DB module as it stands:
+
+```hcl
+backup = {
+  type                = "Periodic"   # or "Continuous"
+  tier                = "Continuous30Days"  # Continuous only
+  interval_in_minutes = 240          # Periodic only
+  retention_in_hours  = 8            # Periodic only
+  storage_redundancy  = "Geo"        # Periodic only, Geo, Local or Zone
+}
+```
+
+The module default is continuous backup with 30 days of retention, which costs
+more than the periodic default the provider would give you. The prototype asks
+for periodic instead. An account cannot be moved back from continuous to
+periodic, so pick before the first apply.
+
 ## Outputs
 
 | Name | Description |
@@ -220,7 +265,7 @@ A `databases` entry:
 | `database_ids` | Resource ID per database name |
 | `database_users` | Username, password and connection string per database, sensitive |
 | `entra_id_identities` | Client ID, principal ID and role per created identity |
-| `entra_id_role_assignment_ids` | Resource ID per role assignment |
+| `entra_id_role_assignment_ids` | Resource ID per role assignment, keyed by the name Azure gave the assignment |
 | `key_vault_id` | Resource ID of the Key Vault |
 | `key_vault_name` | Name of the Key Vault |
 | `key_vault_uri` | URI of the Key Vault |
@@ -229,9 +274,14 @@ A `databases` entry:
 
 ## Requirements
 
-Terraform >= 1.3, `hashicorp/azurerm` >= 5.0, `hashicorp/random` >= 3.5,
-`hashicorp/time` >= 0.9.
+Terraform >= 1.11, `hashicorp/azurerm` >= 4.81 and < 5.0, `hashicorp/random`
+~> 3.6.
 
-The azurerm floor is 5.0 because the Key Vault is configured with
-`rbac_authorization_enabled`, which replaced `enable_rbac_authorization` in that
-major version.
+Both floors come from the modules. The Key Vault module asks for Terraform 1.11,
+the others for 1.9. The azurerm ceiling is there because the Azure Verified
+Modules have not moved to azurerm 5 yet: the Cosmos DB module pins `~> 4.0` and
+the managed identity module pins `< 5.0.0`.
+
+The modules pull in `Azure/azapi`, `Azure/modtm` and `hashicorp/time` of their
+own accord. They are recorded in `.terraform.lock.hcl` but are not configured
+here.
