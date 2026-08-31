@@ -43,6 +43,13 @@ variable "databases" {
   default = []
 
   validation {
+    # The Cosmos DB module picks the API from the databases it is given, and an
+    # account without a single MongoDB database comes out as a NoSQL account.
+    condition     = length(var.databases) > 0
+    error_message = "`databases` must contain at least one database, the account API is derived from it."
+  }
+
+  validation {
     condition     = length(distinct([for db in var.databases : db.name])) == length(var.databases)
     error_message = "Every entry in `databases` must have a unique `name`."
   }
@@ -91,8 +98,10 @@ variable "entra_id_access" {
 
     * `principal_id`         - Object ID of the identity, service principal, group or user.
     * `role_definition_name` - Azure built-in role to assign.
-    * `principal_type`       - `User`, `Group` or `ServicePrincipal`. Set it for freshly created
-                               identities to avoid replication errors during apply.
+    * `principal_type`       - `User`, `Group` or `ServicePrincipal`. The Cosmos DB module does not
+                               set `principal_type` on the assignment, so `ServicePrincipal` is
+                               translated into `skip_service_principal_aad_check`, which is what
+                               keeps a freshly created service principal from failing the apply.
   EOT
 
   type = list(object({
@@ -108,16 +117,29 @@ variable "entra_id_access" {
     ])) == length(var.entra_id_access)
     error_message = "Every entry in `entra_id_access` must have a unique combination of `principal_id` and `role_definition_name`."
   }
+
+  validation {
+    condition = alltrue([
+      for a in var.entra_id_access :
+      a.principal_type == null || contains(["User", "Group", "ServicePrincipal"], coalesce(a.principal_type, "User"))
+    ])
+    error_message = "`principal_type` must be one of User, Group or ServicePrincipal."
+  }
 }
 
 variable "mongo_rbac_enabled" {
   description = "Enable the `EnableMongoRoleBasedAccessControl` capability. Required for per-database users."
   type        = bool
   default     = true
+
+  validation {
+    condition     = var.mongo_rbac_enabled || length([for db in var.databases : db if db.create_user]) == 0
+    error_message = "Databases with `create_user = true` require `mongo_rbac_enabled` to be true, per-database users are a Mongo RBAC feature."
+  }
 }
 
 variable "mongo_server_version" {
-  description = "MongoDB server version exposed by the account."
+  description = "MongoDB server version exposed by the account. One of `7.0`, `6.0`, `5.0`, `4.2`, `4.0`, `3.6` or `3.2`."
   type        = string
   default     = "7.0"
 }
@@ -140,13 +162,13 @@ variable "consistency_level" {
 }
 
 variable "max_interval_in_seconds" {
-  description = "Staleness window in seconds. Only valid when `consistency_level` is `BoundedStaleness`."
+  description = "Staleness window in seconds, 5 to 86400. Only read when `consistency_level` is `BoundedStaleness`."
   type        = number
   default     = null
 }
 
 variable "max_staleness_prefix" {
-  description = "Number of stale requests tolerated. Only valid when `consistency_level` is `BoundedStaleness`."
+  description = "Number of stale requests tolerated, 10 to 2147483647. Only read when `consistency_level` is `BoundedStaleness`."
   type        = number
   default     = null
 }
@@ -169,6 +191,36 @@ variable "automatic_failover_enabled" {
   default     = null
 }
 
+variable "backup" {
+  description = <<-EOT
+    Backup policy of the account, passed to the Cosmos DB module as it stands.
+
+    * `type`                - `Continuous` or `Periodic`.
+    * `tier`                - `Continuous7Days` or `Continuous30Days`. Only read when `type` is `Continuous`.
+    * `interval_in_minutes` - Minutes between two backups, 60 to 1440. Only read when `type` is `Periodic`.
+    * `retention_in_hours`  - Hours a backup is kept, 8 to 720. Only read when `type` is `Periodic`.
+    * `storage_redundancy`  - `Geo`, `Local` or `Zone`. Only read when `type` is `Periodic`.
+
+    The module default is continuous backup with 30 days of retention. Note that
+    switching an existing account from periodic to continuous is a one-way trip in
+    Azure, and that continuous backup rules out multi-region writes.
+  EOT
+
+  type = object({
+    type                = optional(string, "Continuous")
+    tier                = optional(string, "Continuous30Days")
+    interval_in_minutes = optional(number, 240)
+    retention_in_hours  = optional(number, 8)
+    storage_redundancy  = optional(string, "Geo")
+  })
+  default = {}
+
+  validation {
+    condition     = contains(["Continuous", "Periodic"], var.backup.type)
+    error_message = "`backup.type` must be either Continuous or Periodic."
+  }
+}
+
 variable "public_network_access_enabled" {
   description = "Allow access to the account from public networks."
   type        = bool
@@ -179,6 +231,12 @@ variable "ip_range_filter" {
   description = "IP addresses or CIDR ranges allowed to reach the account. An empty list allows every client IP."
   type        = list(string)
   default     = []
+}
+
+variable "enable_telemetry" {
+  description = "Send the anonymous deployment telemetry the Azure Verified Modules collect. It is a `Microsoft.Resources/deployments` resource per module and carries no customer data."
+  type        = bool
+  default     = true
 }
 
 variable "tags" {
@@ -247,7 +305,7 @@ variable "key_vault_grant_deployer_access" {
 }
 
 variable "key_vault_rbac_propagation_delay" {
-  description = "How long to wait after creating the deployer role assignment before writing secrets, for the assignment to reach the Key Vault data plane. Only waited through when the assignment is created."
+  description = "How long the Key Vault module waits after creating the role assignments before writing secrets, for them to reach the Key Vault data plane. Only waited through on create."
   type        = string
   default     = "60s"
 }
@@ -272,6 +330,14 @@ variable "key_vault_secrets_access" {
   validation {
     condition     = length(distinct([for a in var.key_vault_secrets_access : a.principal_id])) == length(var.key_vault_secrets_access)
     error_message = "Every entry in `key_vault_secrets_access` must have a unique `principal_id`."
+  }
+
+  validation {
+    condition = alltrue([
+      for a in var.key_vault_secrets_access :
+      a.principal_type == null || contains(["User", "Group", "ServicePrincipal"], coalesce(a.principal_type, "User"))
+    ])
+    error_message = "`principal_type` must be one of User, Group or ServicePrincipal."
   }
 }
 
