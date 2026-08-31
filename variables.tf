@@ -1,30 +1,31 @@
-variable "name" {
-  description = "Name of the Cosmos DB account. Must be globally unique, 3-44 characters, lowercase letters, numbers and hyphens only."
-  type        = string
-
-  validation {
-    condition     = can(regex("^[a-z0-9][a-z0-9-]{1,42}[a-z0-9]$", var.name))
-    error_message = "`name` must be 3-44 characters of lowercase letters, numbers and hyphens, and may not start or end with a hyphen."
-  }
-}
-
 variable "resource_group_name" {
-  description = "Name of the resource group the Cosmos DB account is created in."
+  description = "Name of the resource group that holds the whole environment."
   type        = string
 }
 
 variable "location" {
-  description = "Azure region of the write (primary) region of the account."
+  description = "Azure region of the environment and of the Cosmos DB write region."
   type        = string
+}
+
+variable "cosmosdb_account_name" {
+  description = "Name of the single Cosmos DB account. Must be globally unique, 3-44 characters, lowercase letters, numbers and hyphens only."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9][a-z0-9-]{1,42}[a-z0-9]$", var.cosmosdb_account_name))
+    error_message = "`cosmosdb_account_name` must be 3-44 characters of lowercase letters, numbers and hyphens, and may not start or end with a hyphen."
+  }
 }
 
 variable "databases" {
   description = <<-EOT
-    MongoDB databases to create in the account.
+    MongoDB databases created in the account. All of them live in the same account.
 
     * `name`           - Database name.
-    * `throughput`     - Provisioned throughput in RU/s. Conflicts with `max_throughput`. Leave both unset to share the account throughput.
+    * `throughput`     - Provisioned throughput in RU/s. Conflicts with `max_throughput`. Leave both unset for a database without dedicated throughput.
     * `max_throughput` - Maximum autoscale throughput in RU/s. Conflicts with `throughput`.
+    * `create_user`    - Create a dedicated user for this database. Set to false for databases reached through Entra ID identities only.
     * `username`       - Username of the database owner. Defaults to the database name.
     * `password`       - Password of the database owner. A strong random password is generated when unset.
     * `role_names`     - Mongo roles granted to the user on this database only. Defaults to `dbOwner`, which is full ownership of that single database.
@@ -34,6 +35,7 @@ variable "databases" {
     name           = string
     throughput     = optional(number)
     max_throughput = optional(number)
+    create_user    = optional(bool, true)
     username       = optional(string)
     password       = optional(string)
     role_names     = optional(list(string), ["dbOwner"])
@@ -56,24 +58,41 @@ variable "databases" {
   }
 }
 
-variable "create_database_users" {
-  description = "Create a dedicated Mongo user (username + password) per database. Set to false when access is granted through Microsoft Entra ID identities only."
-  type        = bool
-  default     = true
+variable "entra_id_identities" {
+  description = <<-EOT
+    User assigned managed identities created for this environment and granted access to the
+    Cosmos DB account. They authenticate with their own Entra ID token instead of a database
+    password. Attach them to whatever runs the workload, for example a Container App, an AKS
+    pod through workload identity, or a VM.
+
+    * `name`                 - Name of the managed identity.
+    * `role_definition_name` - Azure built-in role to assign. Defaults to `Cosmos DB Account Reader Role`,
+                               which grants the read-only keys. Use `DocumentDB Account Contributor`
+                               when the identity also needs to write.
+  EOT
+
+  type = list(object({
+    name                 = string
+    role_definition_name = optional(string, "Cosmos DB Account Reader Role")
+  }))
+  default = []
+
+  validation {
+    condition     = length(distinct([for i in var.entra_id_identities : i.name])) == length(var.entra_id_identities)
+    error_message = "Every entry in `entra_id_identities` must have a unique `name`."
+  }
 }
 
 variable "entra_id_access" {
   description = <<-EOT
-    Microsoft Entra ID principals that are granted access to the account without a username and password
-    of their own. Each entry creates an Azure RBAC role assignment scoped to the Cosmos DB account, which
-    lets the principal read the account connection strings with its own Entra ID token.
+    Entra ID principals that already exist and are granted access to the Cosmos DB account.
+    Use this for identities owned elsewhere, groups of operators, and service principals of
+    other teams.
 
-    * `principal_id`         - Object ID of the managed identity, service principal, group or user.
-    * `role_definition_name` - Azure built-in role to assign. Defaults to `Cosmos DB Account Reader Role`,
-                               which grants read-only keys. Use `DocumentDB Account Contributor` when the
-                               principal also needs to write data.
-    * `principal_type`       - `User`, `Group` or `ServicePrincipal`. Set it for freshly created identities
-                               to avoid replication errors during apply.
+    * `principal_id`         - Object ID of the identity, service principal, group or user.
+    * `role_definition_name` - Azure built-in role to assign.
+    * `principal_type`       - `User`, `Group` or `ServicePrincipal`. Set it for freshly created
+                               identities to avoid replication errors during apply.
   EOT
 
   type = list(object({
@@ -163,7 +182,7 @@ variable "ip_range_filter" {
 }
 
 variable "tags" {
-  description = "Tags applied to the Cosmos DB account."
+  description = "Tags applied to every resource in the environment."
   type        = map(string)
   default     = {}
 }

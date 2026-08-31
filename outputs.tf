@@ -1,10 +1,15 @@
-output "id" {
+output "resource_group_name" {
+  description = "Name of the resource group holding the environment."
+  value       = azurerm_resource_group.this.name
+}
+
+output "cosmosdb_account_id" {
   description = "Resource ID of the Cosmos DB account."
   value       = azurerm_cosmosdb_account.this.id
 }
 
-output "name" {
-  description = "Name of the Cosmos DB account."
+output "cosmosdb_account_name" {
+  description = "Name of the Cosmos DB account, needed to look the connection string up at runtime."
   value       = azurerm_cosmosdb_account.this.name
 }
 
@@ -24,7 +29,7 @@ output "database_ids" {
 }
 
 output "database_users" {
-  description = "Per-database owner credentials and connection string, keyed by database name. Empty when `create_database_users` is false."
+  description = "Owner credentials and connection string of every database that has a user of its own, keyed by database name."
   sensitive   = true
   value = {
     for name, user in azurerm_cosmosdb_mongo_user_definition.this : name => {
@@ -39,13 +44,24 @@ output "database_users" {
   }
 }
 
+output "entra_id_identities" {
+  description = "Client ID, principal ID and granted role of every managed identity created for this environment, keyed by identity name."
+  value = {
+    for name, identity in azurerm_user_assigned_identity.this : name => {
+      client_id            = identity.client_id
+      principal_id         = identity.principal_id
+      role_definition_name = local.identities[name].role_definition_name
+    }
+  }
+}
+
+output "entra_id_role_assignment_ids" {
+  description = "Resource ID of every Entra ID role assignment on the account."
+  value       = { for key, assignment in azurerm_role_assignment.entra_id : key => assignment.id }
+}
+
 output "primary_mongodb_connection_string" {
   description = "Account level MongoDB connection string. It carries the account key and grants access to every database, prefer the per-database users."
   sensitive   = true
   value       = azurerm_cosmosdb_account.this.primary_mongodb_connection_string
-}
-
-output "entra_id_role_assignment_ids" {
-  description = "Resource ID of every Entra ID role assignment, keyed by `<principal_id>|<role_definition_name>`."
-  value       = { for key, assignment in azurerm_role_assignment.entra_id : key => assignment.id }
 }

@@ -1,115 +1,130 @@
 # cosmosdb-terraform
 
-Minimal Terraform module that creates an Azure Cosmos DB account with the
-MongoDB API, the databases you list, and access to them.
+Terraform configuration for a single Azure Cosmos DB account with the MongoDB
+API and the test databases that live in it. Everything is in the root module,
+one flat folder, with `prototype.tfvars` holding the values of the prototype
+environment.
 
-Two ways to grant that access, and they can be combined:
-
-* **A user per database.** Each database gets its own Mongo RBAC user that
-  inherits the built-in `dbOwner` role in that database only. The user owns its
-  own database completely and cannot reach any of the others.
-* **Microsoft Entra ID identities.** Managed identities, service principals,
-  groups or users are granted an Azure role on the account, so they authenticate
-  with their own token and no password is stored anywhere. See the
-  [limitations](#entra-id-access) below.
+```
+main.tf            resource group, Cosmos DB account, databases, users, identities
+variables.tf       inputs
+outputs.tf         connection strings, identity client IDs, resource IDs
+versions.tf        Terraform and provider constraints
+prototype.tfvars   the prototype environment
+```
 
 ## Usage
 
-```hcl
-module "cosmosdb" {
-  source = "github.com/olljanat-ai/cosmosdb-terraform"
+```shell
+az login
+export ARM_SUBSCRIPTION_ID="<subscription-id>"
 
-  name                = "contoso-mongo"
-  resource_group_name = azurerm_resource_group.example.name
-  location            = azurerm_resource_group.example.location
-
-  databases = [
-    { name = "orders", throughput = 400 },
-    { name = "invoices", max_throughput = 1000 },
-  ]
-}
+terraform init
+terraform plan -var-file=prototype.tfvars
+terraform apply -var-file=prototype.tfvars
 ```
 
-`terraform output -json database_users` then returns the username, password and
-ready made connection string of each database.
+`cosmosdb_account_name` becomes a public DNS name, so change it in
+`prototype.tfvars` before the first apply.
 
-## Examples
+Another environment is another `.tfvars` file next to this one, applied into its
+own workspace or state.
 
-* [`examples/password-authentication`](examples/password-authentication) - a
-  user per database, isolated from each other.
-* [`examples/entra-id-authentication`](examples/entra-id-authentication) - no
-  database passwords at all, two managed identities with different access
-  levels.
+## What gets created
 
-## Databases and their users
+One Cosmos DB account, and all databases inside that single account. The
+prototype covers three different types of database side by side:
 
-`databases` is a list, but the resources are keyed by database name, so
-reordering the list does not recreate anything.
+| Database    | Throughput           | Access                                       |
+| ----------- | -------------------- | -------------------------------------------- |
+| `orders`    | provisioned 400 RU/s | own user, `dbOwner` on `orders` only         |
+| `invoices`  | autoscale to 1000 RU/s | own user `invoices-app`, `dbOwner` on `invoices` only |
+| `telemetry` | account default      | no user at all, Entra ID identities only     |
 
-```hcl
-databases = [
-  {
-    name           = "orders"
-    throughput     = 400            # or max_throughput for autoscale
-    username       = "orders-app"   # defaults to the database name
-    password       = null           # generated when unset
-    role_names     = ["dbOwner"]    # full ownership of this database
-  },
-]
+Plus two user assigned managed identities, `-app` with read-write access and
+`-reporting` with read-only access to the account.
+
+## The two ways in
+
+**A user per database.** Each database with `create_user = true` gets its own
+Mongo RBAC user inheriting the built-in `dbOwner` role. A Cosmos DB user
+definition is scoped to a single database, so the user owns its own database
+completely and cannot reach any of the others in the account. Passwords are
+generated unless supplied:
+
+```shell
+terraform output -json database_users | jq -r '.orders.connection_string'
 ```
 
-`role_names` accepts the Mongo built-in roles `read`, `readWrite`, `dbAdmin` and
-`dbOwner`, and any custom role that exists in the same database. It defaults to
-`dbOwner`, and because a Cosmos DB user definition is scoped to a single
-database, that ownership does not extend past it.
-
-Per-database users need the `EnableMongoRoleBasedAccessControl` capability,
-which the module enables by default.
-
-Generated passwords live in the Terraform state. Use an encrypted remote
-backend, or pass passwords in from a secret store through
-`databases[*].password`.
-
-## Entra ID access
-
-```hcl
-entra_id_access = [
-  {
-    principal_id         = azurerm_user_assigned_identity.app.principal_id
-    role_definition_name = "DocumentDB Account Contributor"
-    principal_type       = "ServicePrincipal"
-  },
-]
 ```
+mongodb://orders:<password>@<account>.mongo.cosmos.azure.com:10255/orders?ssl=true&replicaSet=globaldb&retrywrites=false&maxIdleTimeMS=120000&authMechanism=SCRAM-SHA-256&authSource=orders&appName=@<account>@
+```
+
+**Entra ID identities.** No password exists anywhere. The identity signs in as
+itself and asks Azure for the connection string:
+
+```python
+from azure.identity import DefaultAzureCredential
+from azure.mgmt.cosmosdb import CosmosDBManagementClient
+from pymongo import MongoClient
+
+credential = DefaultAzureCredential(managed_identity_client_id="<client_id from entra_id_identities>")
+cosmos = CosmosDBManagementClient(credential, "<subscription-id>")
+
+connection_string = cosmos.database_accounts.list_connection_strings(
+    "<resource_group_name>", "<cosmosdb_account_name>"
+).connection_strings[0].connection_string
+
+MongoClient(connection_string)["telemetry"].events.insert_one({"hello": "world"})
+```
+
+Revoking the role assignment revokes the access.
+
+### Why Entra ID access works this way
 
 Azure Cosmos DB for MongoDB on the RU model has no data plane Entra ID
 authentication: the engine accepts `SCRAM-SHA-256` credentials only, and
-`MONGODB-OIDC` is not offered. Entra ID access therefore works on the control
-plane. The principal proves who it is to Azure, reads the account connection
-string with its own token, and connects with that. Nothing needs a stored
-password, and removing the role assignment removes the access.
+`MONGODB-OIDC` is not offered. Entra ID access therefore works one level up, on
+the control plane. The principal proves who it is to Azure, reads the account
+connection string with its own token, and the driver uses that.
 
-The trade-off is granularity. An Azure role assignment is scoped to the account,
-so it reaches every database in it, and the read-write keys come from `listKeys`
-which only `DocumentDB Account Contributor` holds. Use the per-database users
-when you need isolation between databases, and Entra ID when you need to avoid
-passwords. Setting both gives applications their own database user and operators
-their identity.
+Two consequences are worth knowing:
 
-Data plane Entra ID authentication for MongoDB exists on the vCore deployment
-model, which is a different service without Mongo RBAC user definitions, and is
-out of scope for this module.
+* **Access is account wide.** An Azure role assignment is scoped to the account,
+  so an identity that can read the keys reaches every database in it.
+  Per-database isolation is what the Mongo RBAC users give you.
+* **Read-write means account admin.** The read-write keys come from `listKeys`,
+  which only `DocumentDB Account Contributor` holds, and that role also manages
+  the account itself. Give it out deliberately.
+
+That is why the prototype uses both: `orders` and `invoices` are isolated from
+each other behind their own users, and `telemetry` is the database reached
+without any password.
+
+Data plane Entra ID authentication for MongoDB is available on the vCore
+deployment model, which is a different service with no Mongo RBAC user
+definitions and is out of scope here.
+
+## Secrets in state
+
+Generated passwords and the account keys are stored in the Terraform state. Use
+an encrypted remote backend, or hand passwords in through
+`databases[*].password` from a secret store you already trust.
+
+The `primary_mongodb_connection_string` output carries the account key, which
+bypasses the per-database users and reaches everything. Treat it as a break
+glass credential.
 
 ## Inputs
 
 | Name | Description | Type | Default |
 | --- | --- | --- | --- |
-| `name` | Cosmos DB account name, globally unique | `string` | required |
-| `resource_group_name` | Resource group of the account | `string` | required |
-| `location` | Azure region of the write region | `string` | required |
-| `databases` | Databases to create, see above | `list(object)` | `[]` |
-| `create_database_users` | Create a user per database | `bool` | `true` |
-| `entra_id_access` | Entra ID principals to grant access to | `list(object)` | `[]` |
+| `resource_group_name` | Resource group holding the environment | `string` | required |
+| `location` | Azure region | `string` | required |
+| `cosmosdb_account_name` | Cosmos DB account name, globally unique | `string` | required |
+| `databases` | Databases to create, see below | `list(object)` | `[]` |
+| `entra_id_identities` | Managed identities to create and grant access to | `list(object)` | `[]` |
+| `entra_id_access` | Existing Entra ID principals to grant access to | `list(object)` | `[]` |
 | `mongo_rbac_enabled` | Enable the Mongo RBAC capability | `bool` | `true` |
 | `mongo_server_version` | MongoDB server version | `string` | `"7.0"` |
 | `additional_capabilities` | Extra Cosmos DB capabilities | `list(string)` | `[]` |
@@ -121,20 +136,38 @@ out of scope for this module.
 | `automatic_failover_enabled` | Enable automatic failover | `bool` | `null`, true when replicated |
 | `public_network_access_enabled` | Allow public network access | `bool` | `true` |
 | `ip_range_filter` | Allowed client IPs or CIDR ranges | `list(string)` | `[]` |
-| `tags` | Tags applied to the account | `map(string)` | `{}` |
+| `tags` | Tags applied to every resource | `map(string)` | `{}` |
+
+A `databases` entry:
+
+```hcl
+{
+  name           = "orders"
+  throughput     = 400            # or max_throughput for autoscale, not both
+  create_user    = true           # false leaves the database to Entra ID identities
+  username       = "orders-app"   # defaults to the database name
+  password       = null           # generated when unset
+  role_names     = ["dbOwner"]    # full ownership of this database
+}
+```
+
+`role_names` accepts the Mongo built-in roles `read`, `readWrite`, `dbAdmin` and
+`dbOwner`, and any custom role that exists in the same database.
 
 ## Outputs
 
 | Name | Description |
 | --- | --- |
-| `id` | Resource ID of the account |
-| `name` | Name of the account |
+| `resource_group_name` | Name of the resource group |
+| `cosmosdb_account_id` | Resource ID of the account |
+| `cosmosdb_account_name` | Name of the account |
 | `endpoint` | Endpoint of the account |
 | `mongodb_host` | MongoDB host name, port 10255, TLS required |
 | `database_ids` | Resource ID per database name |
 | `database_users` | Username, password and connection string per database, sensitive |
+| `entra_id_identities` | Client ID, principal ID and role per created identity |
+| `entra_id_role_assignment_ids` | Resource ID per role assignment |
 | `primary_mongodb_connection_string` | Account level connection string, sensitive |
-| `entra_id_role_assignment_ids` | Role assignment ID per granted principal |
 
 ## Requirements
 
