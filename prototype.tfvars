@@ -10,57 +10,27 @@ resource_group_name   = "rg-cosmosdb-prototype"
 location              = "West Europe"
 cosmosdb_account_name = "cosmosdb-mongo-prototype"
 
-# One account, and the test databases below all live in it. Each one covers a
-# different type of database so the prototype exercises them side by side.
-databases = [
-  {
-    # Dedicated provisioned throughput, owner of its own with a generated password.
-    name       = "orders"
-    throughput = 400
-  },
-  {
-    # Autoscaling throughput, and a username that differs from the database name.
-    name           = "invoices"
-    max_throughput = 1000
-    username       = "invoices-app"
-  },
-  {
-    # No dedicated throughput and no user at all. Reached only through the Entra ID
-    # identities below, so nothing anywhere holds a password for it.
-    name        = "telemetry"
-    create_user = false
-  },
-]
+# The one database of the account, with dedicated provisioned throughput. Use
+# `database_max_throughput` instead for autoscale.
+database_name       = "orders"
+database_throughput = 400
 
-# Managed identities that authenticate with their own Entra ID token instead of a
-# username and password. Attach them to whatever runs the workload.
-entra_id_identities = [
-  {
-    # Read and write, because writing needs the read-write account keys.
-    name                 = "id-cosmosdb-prototype-app"
-    role_definition_name = "DocumentDB Account Contributor"
-  },
-  {
-    # Read only, this role hands out the read-only keys.
-    name                 = "id-cosmosdb-prototype-reporting"
-    role_definition_name = "Cosmos DB Account Reader Role"
-  },
-]
-
-# Entra ID principals that already exist elsewhere, for example a group of
-# operators or another team's service principal.
+# The user that owns it. The username defaults to the database name, and the
+# password is generated unless one is given here.
 #
-# entra_id_access = [
-#   {
-#     principal_id         = "00000000-0000-0000-0000-000000000000"
-#     role_definition_name = "Cosmos DB Account Reader Role"
-#     principal_type       = "Group"
-#   },
-# ]
+# database_username = "orders-app"
+# database_password = "..."
 
-# Key Vault for the generated database passwords and the connection strings built
-# from them. The name is part of a public DNS name and has to be globally unique
-# too, so change it along with the account name.
+# The managed identity that reaches the same database with its own Entra ID
+# token instead of a password. Attach it to whatever runs the workload.
+# `DocumentDB Account Contributor` is read-write, `Cosmos DB Account Reader
+# Role` is read-only.
+managed_identity_name                 = "id-cosmosdb-prototype-app"
+managed_identity_role_definition_name = "DocumentDB Account Contributor"
+
+# Key Vault for the generated password and the connection string built from it.
+# The name is part of a public DNS name and has to be globally unique too, so
+# change it along with the account name.
 key_vault_name = "kv-cosmosdb-prototype"
 
 # Off, so that `terraform destroy` really releases the name of a prototype vault.
@@ -71,15 +41,13 @@ key_vault_purge_protection_enabled = false
 # what lets Terraform write the secrets in the first place.
 key_vault_grant_deployer_access = true
 
-# Principals that read the secrets back. Reading one secret means reading them
-# all, so this is not the same thing as reaching a single database.
+# The managed identity gets `Key Vault Secrets User`, so the workload reads the
+# password from the vault rather than carrying it in its configuration.
+key_vault_grant_managed_identity_access = true
+
+# Anyone else who reads the secrets back, for example a group of operators.
 #
-# key_vault_secrets_access = [
-#   {
-#     principal_id   = "00000000-0000-0000-0000-000000000000"
-#     principal_type = "ServicePrincipal"
-#   },
-# ]
+# key_vault_reader_principal_ids = ["00000000-0000-0000-0000-000000000000"]
 
 tags = {
   environment = "prototype"
