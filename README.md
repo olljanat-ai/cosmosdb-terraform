@@ -154,6 +154,57 @@ Destroying the vault leaves it soft deleted for
 long. With `key_vault_purge_protection_enabled = true` it cannot be purged early
 at all, and the setting cannot be turned off again once enabled.
 
+## Rotating the password
+
+Key Vault does not rotate a secret for you. A rotation policy exists for keys,
+where `azurerm_key_vault_key` takes a `rotation_policy` block, but a secret has
+only `expiration_date` and `not_before_date`, and its value changes when
+something writes a new version and not before. Rotating this password is
+therefore a question of what does the writing. Nothing here rotates it today.
+These are the three shapes it would take.
+
+**Terraform drives it.** A `time_rotating` resource feeds the `keepers` of the
+generated password, so it is regenerated once the interval is up, and the same
+apply updates the Mongo user definition and writes the new secret version:
+
+```hcl
+resource "time_rotating" "password" {
+  rotation_days = 90
+}
+
+resource "random_password" "this" {
+  # ...
+  keepers = {
+    rotated_at = time_rotating.password.rotation_rfc3339
+  }
+}
+```
+
+That is about fifteen lines, no new Azure resources, and the rotation is visible
+in the plan before it happens. The catch is that it only fires while applies
+keep running, so it needs a scheduled pipeline behind it: a module nobody
+applies never rotates.
+
+**Key Vault drives it.** The Azure-native pattern is an `expiration_date` on the
+secret, an Event Grid subscription on the vault's `SecretNearExpiry` event, and
+a Function App that generates a password, updates the Cosmos DB user definition
+over the ARM API and writes the new secret version. It rotates without anyone
+running Terraform, and it costs a Function App, a storage account, a plan, the
+Event Grid subscription, role assignments for the function's own identity, and
+the function code itself. Terraform also stops owning the password, so
+`azurerm_cosmosdb_mongo_user_definition` and the secrets need
+`lifecycle { ignore_changes = [...] }` on the password and the values, or the
+next apply reverts what the function just rotated.
+
+**Neither one is seamless.** Both cut over in a single step, and there is a
+single user, so every connection still holding the old password fails from the
+moment it changes until the application re-reads the vault and reconnects.
+Rotation without that window needs two users taking turns, where the workload
+reads whichever secret is current and only the credential it is not using gets
+rotated. That is what Azure's own rotation guidance does for services with two
+sets of keys, and it doubles the user and secret resources here, so it trades
+directly against the one database and one user this module is built around.
+
 ## Secrets in state
 
 The generated password and the account keys are stored in the Terraform state,
