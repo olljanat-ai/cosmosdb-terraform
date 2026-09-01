@@ -9,7 +9,7 @@ variable "location" {
 }
 
 variable "cosmosdb_account_name" {
-  description = "Name of the single Cosmos DB account. Must be globally unique, 3-44 characters, lowercase letters, numbers and hyphens only."
+  description = "Name of the Cosmos DB account. Must be globally unique, 3-44 characters, lowercase letters, numbers and hyphens only."
   type        = string
 
   validation {
@@ -18,102 +18,68 @@ variable "cosmosdb_account_name" {
   }
 }
 
-variable "databases" {
-  description = <<-EOT
-    MongoDB databases created in the account. All of them live in the same account.
+variable "database_name" {
+  description = "Name of the MongoDB database created in the account."
+  type        = string
+}
 
-    * `name`           - Database name.
-    * `throughput`     - Provisioned throughput in RU/s. Conflicts with `max_throughput`. Leave both unset for a database without dedicated throughput.
-    * `max_throughput` - Maximum autoscale throughput in RU/s. Conflicts with `throughput`.
-    * `create_user`    - Create a dedicated user for this database. Set to false for databases reached through Entra ID identities only.
-    * `username`       - Username of the database owner. Defaults to the database name.
-    * `password`       - Password of the database owner. A strong random password is generated when unset.
-    * `role_names`     - Mongo roles granted to the user on this database only. Defaults to `dbOwner`, which is full ownership of that single database.
-  EOT
+variable "database_throughput" {
+  description = "Provisioned throughput of the database in RU/s. Conflicts with `database_max_throughput`. Leave both unset for a database without dedicated throughput."
+  type        = number
+  default     = null
+}
 
-  type = list(object({
-    name           = string
-    throughput     = optional(number)
-    max_throughput = optional(number)
-    create_user    = optional(bool, true)
-    username       = optional(string)
-    password       = optional(string)
-    role_names     = optional(list(string), ["dbOwner"])
-  }))
-  default = []
+variable "database_max_throughput" {
+  description = "Maximum autoscale throughput of the database in RU/s. Conflicts with `database_throughput`."
+  type        = number
+  default     = null
 
   validation {
-    condition     = length(distinct([for db in var.databases : db.name])) == length(var.databases)
-    error_message = "Every entry in `databases` must have a unique `name`."
-  }
-
-  validation {
-    condition     = alltrue([for db in var.databases : db.throughput == null || db.max_throughput == null])
-    error_message = "`throughput` and `max_throughput` are mutually exclusive, set at most one of them per database."
-  }
-
-  validation {
-    condition     = alltrue([for db in var.databases : length(db.role_names) > 0])
-    error_message = "`role_names` must contain at least one Mongo role."
+    condition     = var.database_max_throughput == null || var.database_throughput == null
+    error_message = "`database_throughput` and `database_max_throughput` are mutually exclusive, set at most one of them."
   }
 }
 
-variable "entra_id_identities" {
-  description = <<-EOT
-    User assigned managed identities created for this environment and granted access to the
-    Cosmos DB account. They authenticate with their own Entra ID token instead of a database
-    password. Attach them to whatever runs the workload, for example a Container App, an AKS
-    pod through workload identity, or a VM.
+variable "database_username" {
+  description = "Username of the database owner. Defaults to the database name."
+  type        = string
+  default     = null
+}
 
-    * `name`                 - Name of the managed identity.
-    * `role_definition_name` - Azure built-in role to assign. Defaults to `Cosmos DB Account Reader Role`,
-                               which grants the read-only keys. Use `DocumentDB Account Contributor`
-                               when the identity also needs to write.
-  EOT
+variable "database_password" {
+  description = "Password of the database owner. A strong random password is generated when unset."
+  type        = string
+  default     = null
+  sensitive   = true
+}
 
-  type = list(object({
-    name                 = string
-    role_definition_name = optional(string, "Cosmos DB Account Reader Role")
-  }))
-  default = []
+variable "database_role_names" {
+  description = "Mongo roles granted to the user on this database only. `dbOwner` is full ownership of it. Accepts the built-in roles `read`, `readWrite`, `dbAdmin` and `dbOwner`, and any custom role that exists in the database."
+  type        = list(string)
+  default     = ["dbOwner"]
 
   validation {
-    condition     = length(distinct([for i in var.entra_id_identities : i.name])) == length(var.entra_id_identities)
-    error_message = "Every entry in `entra_id_identities` must have a unique `name`."
+    condition     = length(var.database_role_names) > 0
+    error_message = "`database_role_names` must contain at least one Mongo role."
   }
 }
 
-variable "entra_id_access" {
-  description = <<-EOT
-    Entra ID principals that already exist and are granted access to the Cosmos DB account.
-    Use this for identities owned elsewhere, groups of operators, and service principals of
-    other teams.
-
-    * `principal_id`         - Object ID of the identity, service principal, group or user.
-    * `role_definition_name` - Azure built-in role to assign.
-    * `principal_type`       - `User`, `Group` or `ServicePrincipal`. Set it for freshly created
-                               identities to avoid replication errors during apply.
-  EOT
-
-  type = list(object({
-    principal_id         = string
-    role_definition_name = optional(string, "Cosmos DB Account Reader Role")
-    principal_type       = optional(string)
-  }))
-  default = []
-
-  validation {
-    condition = length(distinct([
-      for a in var.entra_id_access : "${a.principal_id}|${a.role_definition_name}"
-    ])) == length(var.entra_id_access)
-    error_message = "Every entry in `entra_id_access` must have a unique combination of `principal_id` and `role_definition_name`."
-  }
-}
-
-variable "mongo_rbac_enabled" {
-  description = "Enable the `EnableMongoRoleBasedAccessControl` capability. Required for per-database users."
+variable "managed_identity_enabled" {
+  description = "Create a user assigned managed identity and grant it access to the account."
   type        = bool
   default     = true
+}
+
+variable "managed_identity_name" {
+  description = "Name of the managed identity. Defaults to `id-` plus `cosmosdb_account_name`."
+  type        = string
+  default     = null
+}
+
+variable "managed_identity_role_definition_name" {
+  description = "Azure built-in role assigned to the managed identity on the account. `DocumentDB Account Contributor` grants the read-write keys, `Cosmos DB Account Reader Role` the read-only ones."
+  type        = string
+  default     = "DocumentDB Account Contributor"
 }
 
 variable "mongo_server_version" {
@@ -123,7 +89,7 @@ variable "mongo_server_version" {
 }
 
 variable "additional_capabilities" {
-  description = "Extra Cosmos DB capabilities to enable, for example `EnableMongoRetryableWrites`. `EnableMongo` is always enabled."
+  description = "Extra Cosmos DB capabilities to enable, for example `EnableMongoRetryableWrites`. `EnableMongo` and `EnableMongoRoleBasedAccessControl` are always enabled."
   type        = list(string)
   default     = []
 }
@@ -188,7 +154,7 @@ variable "tags" {
 }
 
 variable "key_vault_enabled" {
-  description = "Create a Key Vault and write the database passwords and connection strings into it."
+  description = "Create a Key Vault and write the database password and connection string into it."
   type        = bool
   default     = true
 }
@@ -252,31 +218,25 @@ variable "key_vault_rbac_propagation_delay" {
   default     = "60s"
 }
 
-variable "key_vault_secrets_access" {
-  description = <<-EOT
-    Entra ID principals granted `Key Vault Secrets User` on the vault, which is read access
-    to the secret values. The role is scoped to the vault and not to a single secret, so a
-    principal listed here reads every database password in it.
+variable "key_vault_grant_managed_identity_access" {
+  description = "Assign `Key Vault Secrets User` on the vault to the created managed identity, so that it reads the database password and connection string from the vault."
+  type        = bool
+  default     = true
+}
 
-    * `principal_id`   - Object ID of the identity, service principal, group or user.
-    * `principal_type` - `User`, `Group` or `ServicePrincipal`. Set it for freshly created
-                         identities to avoid replication errors during apply.
-  EOT
-
-  type = list(object({
-    principal_id   = string
-    principal_type = optional(string)
-  }))
-  default = []
+variable "key_vault_reader_principal_ids" {
+  description = "Object IDs of further Entra ID principals granted `Key Vault Secrets User` on the vault, which is read access to the secret values."
+  type        = list(string)
+  default     = []
 
   validation {
-    condition     = length(distinct([for a in var.key_vault_secrets_access : a.principal_id])) == length(var.key_vault_secrets_access)
-    error_message = "Every entry in `key_vault_secrets_access` must have a unique `principal_id`."
+    condition     = length(distinct(var.key_vault_reader_principal_ids)) == length(var.key_vault_reader_principal_ids)
+    error_message = "`key_vault_reader_principal_ids` must not contain duplicates."
   }
 }
 
 variable "key_vault_store_account_connection_string" {
-  description = "Also write the account level MongoDB connection string into the vault. It carries the account key and reaches every database, and everyone with read access to the vault reads it."
+  description = "Also write the account level MongoDB connection string into the vault. It carries the account key and bypasses the database user, and everyone with read access to the vault reads it."
   type        = bool
   default     = false
 }

@@ -23,41 +23,55 @@ output "mongodb_host" {
   value       = local.mongodb_host
 }
 
-output "database_ids" {
-  description = "Resource ID of every created database, keyed by database name."
-  value       = { for name, db in azurerm_cosmosdb_mongo_database.this : name => db.id }
+output "database_name" {
+  description = "Name of the database."
+  value       = azurerm_cosmosdb_mongo_database.this.name
 }
 
-output "database_users" {
-  description = "Owner credentials and connection string of every database that has a user of its own, keyed by database name."
+output "database_id" {
+  description = "Resource ID of the database."
+  value       = azurerm_cosmosdb_mongo_database.this.id
+}
+
+output "database_username" {
+  description = "Username of the database owner."
+  value       = azurerm_cosmosdb_mongo_user_definition.this.username
+}
+
+output "database_password" {
+  description = "Password of the database owner."
   sensitive   = true
-  value = {
-    for name, user in azurerm_cosmosdb_mongo_user_definition.this : name => {
-      username          = user.username
-      password          = local.passwords[name]
-      connection_string = local.connection_strings[name]
-    }
-  }
+  value       = local.password
 }
 
-output "entra_id_identities" {
-  description = "Client ID, principal ID and granted role of every managed identity created for this environment, keyed by identity name."
-  value = {
-    for name, identity in azurerm_user_assigned_identity.this : name => {
-      client_id            = identity.client_id
-      principal_id         = identity.principal_id
-      role_definition_name = local.identities[name].role_definition_name
-    }
-  }
+output "connection_string" {
+  description = "MongoDB connection string of the database, authenticating with the username and password."
+  sensitive   = true
+  value       = local.connection_string
 }
 
-output "entra_id_role_assignment_ids" {
-  description = "Resource ID of every Entra ID role assignment on the account."
-  value       = { for key, assignment in azurerm_role_assignment.entra_id : key => assignment.id }
+output "managed_identity_name" {
+  description = "Name of the managed identity, null when `managed_identity_enabled` is false."
+  value       = one(azurerm_user_assigned_identity.this[*].name)
+}
+
+output "managed_identity_client_id" {
+  description = "Client ID of the managed identity, passed to `DefaultAzureCredential` at runtime. Null when `managed_identity_enabled` is false."
+  value       = one(azurerm_user_assigned_identity.this[*].client_id)
+}
+
+output "managed_identity_principal_id" {
+  description = "Object ID of the managed identity, for role assignments made elsewhere. Null when `managed_identity_enabled` is false."
+  value       = one(azurerm_user_assigned_identity.this[*].principal_id)
+}
+
+output "managed_identity_role_definition_name" {
+  description = "Azure role the managed identity holds on the account, null when `managed_identity_enabled` is false."
+  value       = one(azurerm_role_assignment.managed_identity[*].role_definition_name)
 }
 
 output "primary_mongodb_connection_string" {
-  description = "Account level MongoDB connection string. It carries the account key and grants access to every database, prefer the per-database users."
+  description = "Account level MongoDB connection string. It carries the account key and bypasses the database user, prefer the connection string above."
   sensitive   = true
   value       = azurerm_cosmosdb_account.this.primary_mongodb_connection_string
 }
@@ -77,12 +91,12 @@ output "key_vault_uri" {
   value       = one(azurerm_key_vault.this[*].vault_uri)
 }
 
-output "key_vault_secret_names" {
-  description = "Name of the password and connection string secret of every database that has a user of its own, keyed by database name."
-  value = {
-    for name, secret in azurerm_key_vault_secret.database_password : name => {
-      password          = secret.name
-      connection_string = azurerm_key_vault_secret.database_connection_string[name].name
-    }
-  }
+output "key_vault_password_secret_name" {
+  description = "Name of the secret holding the database password, null when `key_vault_enabled` is false."
+  value       = one(azurerm_key_vault_secret.database_password[*].name)
+}
+
+output "key_vault_connection_string_secret_name" {
+  description = "Name of the secret holding the database connection string, null when `key_vault_enabled` is false."
+  value       = one(azurerm_key_vault_secret.database_connection_string[*].name)
 }

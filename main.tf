@@ -3,37 +3,13 @@ provider "azurerm" {
 }
 
 locals {
-  # `databases` is a list for convenience, but resources are keyed by database name
-  # so that reordering the list does not recreate anything.
-  databases = { for db in var.databases : db.name => db }
-
-  # Databases that get an owner of their own. The rest are reached through Entra ID.
-  users = { for name, db in local.databases : name => db if db.create_user }
-
-  identities = { for i in var.entra_id_identities : i.name => i }
-
-  # Identities created here and principals that already exist end up in the same
-  # set of role assignments. Keys stay known at plan time, values do not have to be.
-  role_assignments = merge(
-    {
-      for name, identity in local.identities : "identity/${name}" => {
-        principal_id         = azurerm_user_assigned_identity.this[name].principal_id
-        role_definition_name = identity.role_definition_name
-        principal_type       = "ServicePrincipal"
-      }
-    },
-    {
-      for a in var.entra_id_access : "principal/${a.principal_id}|${a.role_definition_name}" => {
-        principal_id         = a.principal_id
-        role_definition_name = a.role_definition_name
-        principal_type       = a.principal_type
-      }
-    },
-  )
+  username = coalesce(var.database_username, var.database_name)
+  password = var.database_password != null ? var.database_password : random_password.this[0].result
 
   capabilities = distinct(concat(
-    ["EnableMongo"],
-    var.mongo_rbac_enabled ? ["EnableMongoRoleBasedAccessControl"] : [],
+    # Mongo RBAC is what makes the database scoped user below possible, so it is
+    # always on rather than a choice.
+    ["EnableMongo", "EnableMongoRoleBasedAccessControl"],
     var.additional_capabilities,
   ))
 
@@ -41,35 +17,23 @@ locals {
 
   automatic_failover_enabled = coalesce(var.automatic_failover_enabled, length(var.secondary_locations) > 0)
 
-  passwords = {
-    for name, db in local.users :
-    name => db.password != null ? db.password : random_password.this[name].result
-  }
-
   mongodb_host = "${var.cosmosdb_account_name}.mongo.cosmos.azure.com"
 
   # `urlencode` renders a space as "+", which a MongoDB driver reads literally
   # in the userinfo part of a connection string. Everything else it emits is
   # already correct percent encoding, and a literal "+" comes back as "%2B",
   # so a plain replace is unambiguous.
-  uri_escaped_usernames = {
-    for name, db in local.users :
-    name => replace(urlencode(coalesce(db.username, db.name)), "+", "%20")
-  }
-
-  uri_escaped_passwords = {
-    for name, password in local.passwords : name => replace(urlencode(password), "+", "%20")
-  }
+  uri_escaped_username = replace(urlencode(local.username), "+", "%20")
+  uri_escaped_password = replace(urlencode(local.password), "+", "%20")
 
   # Built once here, because both the output and the Key Vault secret need it.
-  connection_strings = {
-    for name, db in local.users :
-    name => join("", [
-      "mongodb://${local.uri_escaped_usernames[name]}:${local.uri_escaped_passwords[name]}@${local.mongodb_host}:10255/${name}",
-      "?ssl=true&replicaSet=globaldb&retrywrites=false&maxIdleTimeMS=120000",
-      "&authMechanism=SCRAM-SHA-256&authSource=${name}&appName=@${var.cosmosdb_account_name}@",
-    ])
-  }
+  connection_string = join("", [
+    "mongodb://${local.uri_escaped_username}:${local.uri_escaped_password}@${local.mongodb_host}:10255/${var.database_name}",
+    "?ssl=true&replicaSet=globaldb&retrywrites=false&maxIdleTimeMS=120000",
+    "&authMechanism=SCRAM-SHA-256&authSource=${var.database_name}&appName=@${var.cosmosdb_account_name}@",
+  ])
+
+  managed_identity_name = coalesce(var.managed_identity_name, "id-${var.cosmosdb_account_name}")
 
   # A Key Vault name is 3-24 characters, an account name is up to 44, so the
   # derived name is prefixed and truncated. Like the account name it is part of
@@ -81,13 +45,25 @@ locals {
 
   # A secret name accepts letters, digits and hyphens only, a database name is
   # not that restricted.
-  key_vault_secret_names = {
-    for name, db in local.users : name => replace(name, "/[^0-9A-Za-z-]/", "-")
-  }
+  key_vault_secret_name = replace(var.database_name, "/[^0-9A-Za-z-]/", "-")
 
-  key_vault_secrets_access = {
-    for a in var.key_vault_secrets_access : a.principal_id => a
-  }
+  # Keys stay known at plan time, the principal ID of a fresh identity does not.
+  key_vault_readers = merge(
+    {
+      for id in var.key_vault_reader_principal_ids : "principal/${id}" => {
+        principal_id   = id
+        principal_type = null
+      }
+    },
+    var.key_vault_grant_managed_identity_access ? {
+      for principal_id in azurerm_user_assigned_identity.this[*].principal_id : "managed-identity" => {
+        principal_id = principal_id
+        # Set explicitly, a freshly created identity is not replicated yet when
+        # the assignment is made.
+        principal_type = "ServicePrincipal"
+      }
+    } : {},
+  )
 }
 
 resource "azurerm_resource_group" "this" {
@@ -96,7 +72,6 @@ resource "azurerm_resource_group" "this" {
   tags     = var.tags
 }
 
-# One account for the whole environment. Every database below lives in it.
 resource "azurerm_cosmosdb_account" "this" {
   name                = var.cosmosdb_account_name
   resource_group_name = azurerm_resource_group.this.name
@@ -134,25 +109,17 @@ resource "azurerm_cosmosdb_account" "this" {
       zone_redundant    = var.zone_redundant
     }
   }
-
-  lifecycle {
-    precondition {
-      condition     = var.mongo_rbac_enabled || length(local.users) == 0
-      error_message = "Databases with `create_user = true` require `mongo_rbac_enabled` to be true, per-database users are a Mongo RBAC feature."
-    }
-  }
 }
 
+# The one database of the account.
 resource "azurerm_cosmosdb_mongo_database" "this" {
-  for_each = local.databases
-
-  name                = each.value.name
+  name                = var.database_name
   resource_group_name = azurerm_cosmosdb_account.this.resource_group_name
   account_name        = azurerm_cosmosdb_account.this.name
-  throughput          = each.value.throughput
+  throughput          = var.database_throughput
 
   dynamic "autoscale_settings" {
-    for_each = each.value.max_throughput == null ? [] : [each.value.max_throughput]
+    for_each = var.database_max_throughput == null ? [] : [var.database_max_throughput]
 
     content {
       max_throughput = autoscale_settings.value
@@ -160,9 +127,9 @@ resource "azurerm_cosmosdb_mongo_database" "this" {
   }
 }
 
-# Only generated for databases that did not come with a password of their own.
+# Only generated when no password was supplied.
 resource "random_password" "this" {
-  for_each = { for name, db in local.users : name => db if db.password == null }
+  count = var.database_password == null ? 1 : 0
 
   length      = 32
   min_lower   = 1
@@ -174,42 +141,40 @@ resource "random_password" "this" {
   override_special = "-_.~"
 }
 
-# One user per database, owning that database and nothing else: the user
-# definition is scoped to a single database and inherits `dbOwner` in it.
+# Way in number one: username and password. The user definition is scoped to the
+# single database and inherits `dbOwner` in it.
 resource "azurerm_cosmosdb_mongo_user_definition" "this" {
-  for_each = local.users
-
-  cosmos_mongo_database_id = azurerm_cosmosdb_mongo_database.this[each.key].id
-  username                 = coalesce(each.value.username, each.value.name)
-  password                 = local.passwords[each.key]
-  inherited_role_names     = each.value.role_names
+  cosmos_mongo_database_id = azurerm_cosmosdb_mongo_database.this.id
+  username                 = local.username
+  password                 = local.password
+  inherited_role_names     = var.database_role_names
 }
 
+# Way in number two: a managed identity that authenticates with its own Entra ID
+# token and reads the account connection string through the control plane.
 resource "azurerm_user_assigned_identity" "this" {
-  for_each = local.identities
+  count = var.managed_identity_enabled ? 1 : 0
 
-  name                = each.value.name
+  name                = local.managed_identity_name
   resource_group_name = azurerm_resource_group.this.name
   location            = azurerm_resource_group.this.location
   tags                = var.tags
 }
 
-# Entra ID principals authenticate with their own token and read the account
-# connection string through the control plane instead of holding a password.
-resource "azurerm_role_assignment" "entra_id" {
-  for_each = local.role_assignments
+resource "azurerm_role_assignment" "managed_identity" {
+  count = length(azurerm_user_assigned_identity.this)
 
   scope                = azurerm_cosmosdb_account.this.id
-  role_definition_name = each.value.role_definition_name
-  principal_id         = each.value.principal_id
-  principal_type       = each.value.principal_type
+  role_definition_name = var.managed_identity_role_definition_name
+  principal_id         = azurerm_user_assigned_identity.this[0].principal_id
+  principal_type       = "ServicePrincipal"
 }
 
 data "azurerm_client_config" "current" {}
 
-# The generated passwords and the connection strings built from them are written
-# here, so that an application reads them from the vault instead of from the
-# Terraform state or an output.
+# The password and the connection string built from it are written here, so that
+# an application reads them from the vault instead of from the Terraform state
+# or an output.
 resource "azurerm_key_vault" "this" {
   count = var.key_vault_enabled ? 1 : 0
 
@@ -258,10 +223,10 @@ resource "time_sleep" "key_vault_rbac" {
   }
 }
 
-# Reading one secret means reading every secret in the vault, the role is scoped
-# to the vault and not to a secret, so grant this deliberately.
+# The managed identity reads the same credentials from the vault, which is how a
+# workload gets them without a password baked into its configuration.
 resource "azurerm_role_assignment" "key_vault_secrets_user" {
-  for_each = var.key_vault_enabled ? local.key_vault_secrets_access : {}
+  for_each = var.key_vault_enabled ? local.key_vault_readers : {}
 
   scope                = azurerm_key_vault.this[0].id
   role_definition_name = "Key Vault Secrets User"
@@ -270,10 +235,10 @@ resource "azurerm_role_assignment" "key_vault_secrets_user" {
 }
 
 resource "azurerm_key_vault_secret" "database_password" {
-  for_each = var.key_vault_enabled ? local.users : {}
+  count = var.key_vault_enabled ? 1 : 0
 
-  name         = "${local.key_vault_secret_names[each.key]}-password"
-  value        = local.passwords[each.key]
+  name         = "${local.key_vault_secret_name}-password"
+  value        = local.password
   key_vault_id = azurerm_key_vault.this[0].id
   content_type = "password"
   tags         = var.tags
@@ -285,10 +250,10 @@ resource "azurerm_key_vault_secret" "database_password" {
 }
 
 resource "azurerm_key_vault_secret" "database_connection_string" {
-  for_each = var.key_vault_enabled ? local.users : {}
+  count = var.key_vault_enabled ? 1 : 0
 
-  name         = "${local.key_vault_secret_names[each.key]}-connection-string"
-  value        = local.connection_strings[each.key]
+  name         = "${local.key_vault_secret_name}-connection-string"
+  value        = local.connection_string
   key_vault_id = azurerm_key_vault.this[0].id
   content_type = "connection-string"
   tags         = var.tags
@@ -299,8 +264,8 @@ resource "azurerm_key_vault_secret" "database_connection_string" {
   ]
 }
 
-# Off by default: this one carries the account key and reaches every database,
-# and anyone who can read a secret in the vault can read this one too.
+# Off by default: this one carries the account key, which bypasses the database
+# user entirely.
 resource "azurerm_key_vault_secret" "primary_mongodb_connection_string" {
   count = var.key_vault_enabled && var.key_vault_store_account_connection_string ? 1 : 0
 
