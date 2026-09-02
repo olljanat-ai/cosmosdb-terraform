@@ -7,7 +7,7 @@
 # unique, so change it before the first apply.
 
 resource_group_name   = "rg-cosmosdb-prototype"
-location              = "West Europe"
+location              = "swedencentral"
 cosmosdb_account_name = "cosmosdb-mongo-prototype"
 
 # The one database of the account, with dedicated provisioned throughput. Use
