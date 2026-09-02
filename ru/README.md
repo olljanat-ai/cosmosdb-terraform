@@ -85,11 +85,11 @@ Sources:
 * [Connect using role-based access control and Microsoft Entra ID](https://learn.microsoft.com/en-us/azure/cosmos-db/nosql/how-to-connect-role-based-access-control)
   — Entra ID data plane role-based access control in Cosmos DB, documented for
   the **API for NoSQL**. There is no equivalent for the API for MongoDB (RU).
-* [Microsoft Entra ID authentication - Azure Cosmos DB for MongoDB vCore](https://learn.microsoft.com/en-us/azure/cosmos-db/mongodb/vcore/entra-authentication)
-  and [Configure Microsoft Entra ID authentication](https://learn.microsoft.com/en-us/azure/cosmos-db/mongodb/vcore/how-to-configure-entra-authentication)
+* [Connect using role-based access control and Microsoft Entra ID - Azure DocumentDB](https://learn.microsoft.com/en-us/azure/documentdb/how-to-connect-role-based-access-control)
   — token based authentication for MongoDB on Azure exists, but on the **vCore**
   deployment model, which is a different service with a different resource type
-  and no Mongo RBAC user definitions. Moving there is a migration, not a flag.
+  and no Mongo RBAC user definitions. That is what [`../vcore`](../vcore)
+  configures, and moving there is a migration, not a flag.
 * [`azurerm_cosmosdb_mongo_user_definition`](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/cosmosdb_mongo_user_definition)
   — the Terraform resource used here. `username` and `password` are the only
   credentials it takes.
