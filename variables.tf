@@ -64,24 +64,6 @@ variable "database_role_names" {
   }
 }
 
-variable "managed_identity_enabled" {
-  description = "Create a user assigned managed identity and grant it access to the account."
-  type        = bool
-  default     = true
-}
-
-variable "managed_identity_name" {
-  description = "Name of the managed identity. Defaults to `id-` plus `cosmosdb_account_name`."
-  type        = string
-  default     = null
-}
-
-variable "managed_identity_role_definition_name" {
-  description = "Azure built-in role assigned to the managed identity on the account. `DocumentDB Account Contributor` grants the read-write keys, `Cosmos DB Account Reader Role` the read-only ones."
-  type        = string
-  default     = "DocumentDB Account Contributor"
-}
-
 variable "mongo_server_version" {
   description = "MongoDB server version exposed by the account."
   type        = string
@@ -218,14 +200,8 @@ variable "key_vault_rbac_propagation_delay" {
   default     = "60s"
 }
 
-variable "key_vault_grant_managed_identity_access" {
-  description = "Assign `Key Vault Secrets User` on the vault to the created managed identity, so that it reads the database password and connection string from the vault."
-  type        = bool
-  default     = true
-}
-
 variable "key_vault_reader_principal_ids" {
-  description = "Object IDs of further Entra ID principals granted `Key Vault Secrets User` on the vault, which is read access to the secret values."
+  description = "Object IDs of Entra ID principals granted `Key Vault Secrets User` on the vault, which is read access to the secret values. This is where the managed identity of a workload goes, so that it fetches the database password from the vault rather than carrying it in its configuration."
   type        = list(string)
   default     = []
 

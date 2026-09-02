@@ -33,8 +33,6 @@ locals {
     "&authMechanism=SCRAM-SHA-256&authSource=${var.database_name}&appName=@${var.cosmosdb_account_name}@",
   ])
 
-  managed_identity_name = coalesce(var.managed_identity_name, "id-${var.cosmosdb_account_name}")
-
   # A Key Vault name is 3-24 characters, an account name is up to 44, so the
   # derived name is prefixed and truncated. Like the account name it is part of
   # a public DNS name, so set `key_vault_name` when truncation is not unique
@@ -46,24 +44,6 @@ locals {
   # A secret name accepts letters, digits and hyphens only, a database name is
   # not that restricted.
   key_vault_secret_name = replace(var.database_name, "/[^0-9A-Za-z-]/", "-")
-
-  # Keys stay known at plan time, the principal ID of a fresh identity does not.
-  key_vault_readers = merge(
-    {
-      for id in var.key_vault_reader_principal_ids : "principal/${id}" => {
-        principal_id   = id
-        principal_type = null
-      }
-    },
-    var.key_vault_grant_managed_identity_access ? {
-      for principal_id in azurerm_user_assigned_identity.this[*].principal_id : "managed-identity" => {
-        principal_id = principal_id
-        # Set explicitly, a freshly created identity is not replicated yet when
-        # the assignment is made.
-        principal_type = "ServicePrincipal"
-      }
-    } : {},
-  )
 }
 
 resource "azurerm_resource_group" "this" {
@@ -141,33 +121,19 @@ resource "random_password" "this" {
   override_special = "-_.~"
 }
 
-# Way in number one: username and password. The user definition is scoped to the
-# single database and inherits `dbOwner` in it.
+# The only way in: username and password. Azure Cosmos DB for MongoDB on the RU
+# model has no Entra ID (workload identity) authentication on the data plane, the
+# engine speaks `SCRAM-SHA-256` and nothing else, so this user definition is the
+# whole access story. See the "Authentication" section of the README for the
+# documentation this rests on.
+#
+# The user definition is scoped to the single database and inherits `dbOwner`
+# in it.
 resource "azurerm_cosmosdb_mongo_user_definition" "this" {
   cosmos_mongo_database_id = azurerm_cosmosdb_mongo_database.this.id
   username                 = local.username
   password                 = local.password
   inherited_role_names     = var.database_role_names
-}
-
-# Way in number two: a managed identity that authenticates with its own Entra ID
-# token and reads the account connection string through the control plane.
-resource "azurerm_user_assigned_identity" "this" {
-  count = var.managed_identity_enabled ? 1 : 0
-
-  name                = local.managed_identity_name
-  resource_group_name = azurerm_resource_group.this.name
-  location            = azurerm_resource_group.this.location
-  tags                = var.tags
-}
-
-resource "azurerm_role_assignment" "managed_identity" {
-  count = length(azurerm_user_assigned_identity.this)
-
-  scope                = azurerm_cosmosdb_account.this.id
-  role_definition_name = var.managed_identity_role_definition_name
-  principal_id         = azurerm_user_assigned_identity.this[0].principal_id
-  principal_type       = "ServicePrincipal"
 }
 
 data "azurerm_client_config" "current" {}
@@ -223,15 +189,15 @@ resource "time_sleep" "key_vault_rbac" {
   }
 }
 
-# The managed identity reads the same credentials from the vault, which is how a
-# workload gets them without a password baked into its configuration.
+# A workload reads the credentials from the vault with its own managed identity,
+# which is as close to workload identity as this account gets: the identity
+# authenticates to Key Vault, not to MongoDB.
 resource "azurerm_role_assignment" "key_vault_secrets_user" {
-  for_each = var.key_vault_enabled ? local.key_vault_readers : {}
+  for_each = var.key_vault_enabled ? toset(var.key_vault_reader_principal_ids) : toset([])
 
   scope                = azurerm_key_vault.this[0].id
   role_definition_name = "Key Vault Secrets User"
-  principal_id         = each.value.principal_id
-  principal_type       = each.value.principal_type
+  principal_id         = each.value
 }
 
 resource "azurerm_key_vault_secret" "database_password" {
