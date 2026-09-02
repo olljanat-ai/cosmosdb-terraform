@@ -19,7 +19,9 @@ prototype.tfvars   the prototype environment
 ```
 
 The other deployment model of the same API lives in [`../ru`](../ru), where a
-username and a password are the only thing on offer. See
+username and a password are the only thing on offer, and
+[`../nosql`](../nosql) is the NoSQL API, which has Entra ID authentication too
+and scopes it per database. See
 [Choosing between the two](#choosing-between-the-two).
 
 ## Usage
@@ -274,6 +276,12 @@ Microsoft; see <https://aka.ms/avm/telemetryinfo>.
 
 Moving from one to the other is a migration rather than a flag: different
 resource type, different endpoint, different credentials.
+
+Access here is cluster wide: every principal registered on the cluster is `root`
+over all of its databases, because that is the only role the cluster user API
+offers. Several databases that must not read each other therefore need several
+clusters — or [`../nosql`](../nosql), where a role assignment is scoped to one
+database and each database has an identity of its own.
 
 ## Inputs
 
