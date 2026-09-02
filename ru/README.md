@@ -4,8 +4,8 @@ Terraform configuration for one Azure Cosmos DB account with the MongoDB API on
 the **RU model**, holding **one database** reached with a **username and
 password**. That is the only authentication this service offers on the data
 plane — see [Authentication](#authentication) for why there is no managed
-identity or workload identity option here, and
-[`../vcore`](../vcore) for the variant that has one.
+identity or workload identity option here, and [`../vcore`](../vcore) or
+[`../nosql`](../nosql) for the variants that have one.
 
 This is a root module in one flat folder, with `prototype.tfvars` holding the
 values of the prototype environment.
