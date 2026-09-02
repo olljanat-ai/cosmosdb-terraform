@@ -34,7 +34,7 @@ locals {
 
   mongodb_host = "${var.cluster_name}.global.mongocluster.cosmos.azure.com"
 
-  # The username of an `MONGODB-OIDC` connection is the *client* ID of the
+  # The username of a `MONGODB-OIDC` connection is the *client* ID of the
   # identity that connects, which is not known here: one cluster serves several
   # of them, and a user is identified by its object ID rather than its client
   # ID. So this is a template with the one field the workload fills in itself.
@@ -78,11 +78,11 @@ resource "azurerm_resource_group" "this" {
 
 # The cluster API takes an administrator username and password whether or not
 # native authentication is allowed, and the module underneath requires both, so
-# a password is generated here and never written anywhere else: no output, no
-# Key Vault, no secret. While `native_authentication_enabled` is false the
-# credential cannot be used to connect at all, because the cluster does not
-# accept the mechanism it belongs to. It does live in the Terraform state, see
-# the "Secrets in state" section of the README.
+# a password is generated here and put nowhere: no Key Vault, no secret, and an
+# output that exists only for the case where `native_authentication_enabled` is
+# turned on. While it is off the credential cannot be used to connect at all,
+# because the cluster does not accept the mechanism it belongs to. It does live
+# in the Terraform state, see the "Secrets in state" section of the README.
 resource "random_password" "native_administrator" {
   length      = 32
   min_lower   = 1
