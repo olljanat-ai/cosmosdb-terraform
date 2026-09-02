@@ -50,26 +50,6 @@ output "connection_string" {
   value       = local.connection_string
 }
 
-output "managed_identity_name" {
-  description = "Name of the managed identity, null when `managed_identity_enabled` is false."
-  value       = one(azurerm_user_assigned_identity.this[*].name)
-}
-
-output "managed_identity_client_id" {
-  description = "Client ID of the managed identity, passed to `DefaultAzureCredential` at runtime. Null when `managed_identity_enabled` is false."
-  value       = one(azurerm_user_assigned_identity.this[*].client_id)
-}
-
-output "managed_identity_principal_id" {
-  description = "Object ID of the managed identity, for role assignments made elsewhere. Null when `managed_identity_enabled` is false."
-  value       = one(azurerm_user_assigned_identity.this[*].principal_id)
-}
-
-output "managed_identity_role_definition_name" {
-  description = "Azure role the managed identity holds on the account, null when `managed_identity_enabled` is false."
-  value       = one(azurerm_role_assignment.managed_identity[*].role_definition_name)
-}
-
 output "primary_mongodb_connection_string" {
   description = "Account level MongoDB connection string. It carries the account key and bypasses the database user, prefer the connection string above."
   sensitive   = true

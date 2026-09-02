@@ -21,13 +21,6 @@ database_throughput = 400
 # database_username = "orders-app"
 # database_password = "..."
 
-# The managed identity that reaches the same database with its own Entra ID
-# token instead of a password. Attach it to whatever runs the workload.
-# `DocumentDB Account Contributor` is read-write, `Cosmos DB Account Reader
-# Role` is read-only.
-managed_identity_name                 = "id-cosmosdb-prototype-app"
-managed_identity_role_definition_name = "DocumentDB Account Contributor"
-
 # Key Vault for the generated password and the connection string built from it.
 # The name is part of a public DNS name and has to be globally unique too, so
 # change it along with the account name.
@@ -41,11 +34,11 @@ key_vault_purge_protection_enabled = false
 # what lets Terraform write the secrets in the first place.
 key_vault_grant_deployer_access = true
 
-# The managed identity gets `Key Vault Secrets User`, so the workload reads the
-# password from the vault rather than carrying it in its configuration.
-key_vault_grant_managed_identity_access = true
-
-# Anyone else who reads the secrets back, for example a group of operators.
+# Everyone who reads the secrets back: the managed identity of the workload, and
+# for example a group of operators. Cosmos DB for MongoDB (RU) has no Entra ID
+# authentication on the database itself, so an identity listed here authenticates
+# to the vault and then connects to MongoDB with the username and password it
+# finds there.
 #
 # key_vault_reader_principal_ids = ["00000000-0000-0000-0000-000000000000"]
 

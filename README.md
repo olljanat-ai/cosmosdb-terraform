@@ -1,15 +1,16 @@
 # cosmosdb-terraform
 
 Terraform configuration for one Azure Cosmos DB account with the MongoDB API,
-holding **one database** that is reachable in **two ways**: with a username and
-password, and with an Azure managed identity. Everything is in the root module,
-one flat folder, with `prototype.tfvars` holding the values of the prototype
-environment.
+holding **one database** reached with a **username and password**. That is the
+only authentication this service offers on the data plane — see
+[Authentication](#authentication) for why there is no managed identity or
+workload identity option here. Everything is in the root module, one flat
+folder, with `prototype.tfvars` holding the values of the prototype environment.
 
 ```
-main.tf            resource group, Cosmos DB account, database, user, managed identity, Key Vault
+main.tf            resource group, Cosmos DB account, database, user, Key Vault
 variables.tf       inputs
-outputs.tf         connection string, identity client ID, secret names, resource IDs
+outputs.tf         connection string, secret names, resource IDs
 versions.tf        Terraform and provider constraints
 prototype.tfvars   the prototype environment
 ```
@@ -37,14 +38,13 @@ own workspace or state.
 * One Cosmos DB account, MongoDB API, with Mongo RBAC enabled.
 * One database in it, named by `database_name`.
 * One Mongo RBAC user owning that database, with a generated password.
-* One user assigned managed identity with access to the account.
 * One Key Vault holding the password and the connection string.
 
-## The two ways in
+## Authentication
 
-**Username and password.** The Mongo RBAC user inherits the built-in `dbOwner`
-role. A Cosmos DB user definition is scoped to a single database, so the user
-owns the database and nothing else in the account:
+**Username and password, and nothing else.** The Mongo RBAC user inherits the
+built-in `dbOwner` role. A Cosmos DB user definition is scoped to a single
+database, so the user owns the database and nothing else in the account:
 
 ```shell
 terraform output -raw connection_string
@@ -54,63 +54,74 @@ terraform output -raw connection_string
 mongodb://orders:<password>@<account>.mongo.cosmos.azure.com:10255/orders?ssl=true&replicaSet=globaldb&retrywrites=false&maxIdleTimeMS=120000&authMechanism=SCRAM-SHA-256&authSource=orders&appName=@<account>@
 ```
 
-**Managed identity.** No password in the application's configuration. The
-identity signs in as itself and asks Azure for the connection string:
+```python
+from pymongo import MongoClient
+
+MongoClient("<connection_string>")["<database_name>"].events.insert_one({"hello": "world"})
+```
+
+### Why there is no workload identity here
+
+Azure Cosmos DB for MongoDB on the **RU model** — the service this configuration
+creates — has no Microsoft Entra ID authentication on the data plane. The engine
+accepts `SCRAM-SHA-256` credentials only; `MONGODB-OIDC`, the mechanism a
+MongoDB driver would use with an Entra ID token, is not offered. A managed
+identity or a federated workload identity therefore has nothing to authenticate
+*to* on the database itself, which is why this configuration creates no identity
+and grants no Azure role on the account.
+
+Sources:
+
+* [Configure role-based access control - Azure Cosmos DB for MongoDB](https://learn.microsoft.com/en-us/azure/cosmos-db/mongodb/how-to-setup-rbac)
+  — the data plane authorization model for this API. Users are created as user
+  definitions with a password, and every driver example authenticates with
+  `authMechanism=SCRAM-SHA-256`.
+* [Connect using role-based access control and Microsoft Entra ID](https://learn.microsoft.com/en-us/azure/cosmos-db/nosql/how-to-connect-role-based-access-control)
+  — Entra ID data plane role-based access control in Cosmos DB, documented for
+  the **API for NoSQL**. There is no equivalent for the API for MongoDB (RU).
+* [Microsoft Entra ID authentication - Azure Cosmos DB for MongoDB vCore](https://learn.microsoft.com/en-us/azure/cosmos-db/mongodb/vcore/entra-authentication)
+  and [Configure Microsoft Entra ID authentication](https://learn.microsoft.com/en-us/azure/cosmos-db/mongodb/vcore/how-to-configure-entra-authentication)
+  — token based authentication for MongoDB on Azure exists, but on the **vCore**
+  deployment model, which is a different service with a different resource type
+  and no Mongo RBAC user definitions. Moving there is a migration, not a flag.
+* [`azurerm_cosmosdb_mongo_user_definition`](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/cosmosdb_mongo_user_definition)
+  — the Terraform resource used here. `username` and `password` are the only
+  credentials it takes.
+* [What are managed identities for Azure resources?](https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/overview)
+  and [Microsoft Entra Workload ID](https://learn.microsoft.com/en-us/entra/workload-id/workload-identities-overview)
+  — background on the mechanism that does not apply here.
+
+### What an identity can still do
+
+An Entra ID identity has one useful job in this configuration: reading the
+password out of the Key Vault. Put the workload's managed identity object ID in
+`key_vault_reader_principal_ids` — the object ID of the identity, not its client
+ID — and it fetches the connection string at start up instead of carrying a
+password in its configuration:
 
 ```python
 from azure.identity import DefaultAzureCredential
-from azure.mgmt.cosmosdb import CosmosDBManagementClient
+from azure.keyvault.secrets import SecretClient
 from pymongo import MongoClient
 
-credential = DefaultAzureCredential(managed_identity_client_id="<managed_identity_client_id>")
-cosmos = CosmosDBManagementClient(credential, "<subscription-id>")
-
-connection_string = cosmos.database_accounts.list_connection_strings(
-    "<resource_group_name>", "<cosmosdb_account_name>"
-).connection_strings[0].connection_string
+credential = DefaultAzureCredential(managed_identity_client_id="<client-id>")
+connection_string = SecretClient("<key_vault_uri>", credential).get_secret(
+    "<key_vault_connection_string_secret_name>"
+).value
 
 MongoClient(connection_string)["<database_name>"].events.insert_one({"hello": "world"})
 ```
 
-The same identity also gets `Key Vault Secrets User` on the vault, so it can
-read the database user's connection string instead if you prefer the workload to
-connect as that user:
+The identity authenticates to Key Vault, not to MongoDB. The database still sees
+a username and a password, so this removes the secret from the application's
+configuration but not from the system: whoever holds the role on the vault holds
+the database password.
 
-```python
-from azure.keyvault.secrets import SecretClient
-
-connection_string = SecretClient("<key_vault_uri>", credential).get_secret(
-    "<key_vault_connection_string_secret_name>"
-).value
-```
-
-Revoking the role assignment revokes the access. Set
-`managed_identity_enabled = false` to skip the identity entirely, or
-`key_vault_grant_managed_identity_access = false` to keep it off the vault.
-
-### Why managed identity access works this way
-
-Azure Cosmos DB for MongoDB on the RU model has no data plane Entra ID
-authentication: the engine accepts `SCRAM-SHA-256` credentials only, and
-`MONGODB-OIDC` is not offered. Entra ID access therefore works one level up, on
-the control plane. The principal proves who it is to Azure, reads the account
-connection string with its own token, and the driver uses that.
-
-Two consequences are worth knowing:
-
-* **Access is account wide.** An Azure role assignment is scoped to the account,
-  so an identity that can read the keys reaches every database in it. With one
-  database in the account that is the same thing, which is part of why this
-  configuration keeps it to one.
-* **Read-write means account admin.** The read-write keys come from `listKeys`,
-  which only `DocumentDB Account Contributor` holds, and that role also manages
-  the account itself. Give it out deliberately, or use
-  `managed_identity_role_definition_name = "Cosmos DB Account Reader Role"` for
-  read-only access.
-
-Data plane Entra ID authentication for MongoDB is available on the vCore
-deployment model, which is a different service with no Mongo RBAC user
-definitions and is out of scope here.
+One further path exists and is deliberately not built here: an identity with
+`DocumentDB Account Contributor` on the account can call `listKeys` over the
+control plane and read the account key. That key bypasses the database user and
+reaches every database in the account, and the role that grants it also
+administers the account, so it is account admin rather than database access.
 
 ## Key Vault
 
@@ -143,11 +154,11 @@ Officer`, and the apply then waits `key_vault_rbac_propagation_delay` for that
 assignment to reach the data plane before writing the first secret. Turn the
 grant off when that identity already holds the role higher up in the hierarchy.
 
-The managed identity and every principal in `key_vault_reader_principal_ids` get
-`Key Vault Secrets User`, which is read access to the values. That role is scoped
-to the vault, not to a single secret, so grant it the way you would grant the
-database password itself. It is also why the account level connection string is
-not stored by default.
+Every principal in `key_vault_reader_principal_ids` gets `Key Vault Secrets
+User`, which is read access to the values. That role is scoped to the vault, not
+to a single secret, so grant it the way you would grant the database password
+itself. It is also why the account level connection string is not stored by
+default.
 
 Destroying the vault leaves it soft deleted for
 `key_vault_soft_delete_retention_days`, and the name stays reserved for that
@@ -228,9 +239,6 @@ credential.
 | `database_username` | Username of the database owner | `string` | `null`, the database name |
 | `database_password` | Password of the database owner | `string` | `null`, generated |
 | `database_role_names` | Mongo roles granted on this database | `list(string)` | `["dbOwner"]` |
-| `managed_identity_enabled` | Create a managed identity and grant it access | `bool` | `true` |
-| `managed_identity_name` | Name of the managed identity | `string` | `null`, derived from the account name |
-| `managed_identity_role_definition_name` | Azure role assigned to it on the account | `string` | `"DocumentDB Account Contributor"` |
 | `key_vault_enabled` | Create a Key Vault and write the secrets into it | `bool` | `true` |
 | `key_vault_name` | Name of the Key Vault, globally unique | `string` | `null`, derived from the account name |
 | `key_vault_sku_name` | SKU of the Key Vault | `string` | `"standard"` |
@@ -239,8 +247,7 @@ credential.
 | `key_vault_public_network_access_enabled` | Allow public network access to the vault | `bool` | `true` |
 | `key_vault_grant_deployer_access` | Assign `Key Vault Secrets Officer` to the identity running Terraform | `bool` | `true` |
 | `key_vault_rbac_propagation_delay` | Wait after that assignment before writing secrets | `string` | `"60s"` |
-| `key_vault_grant_managed_identity_access` | Let the managed identity read the secrets | `bool` | `true` |
-| `key_vault_reader_principal_ids` | Further principals granted read access to the secrets | `list(string)` | `[]` |
+| `key_vault_reader_principal_ids` | Principals granted read access to the secrets | `list(string)` | `[]` |
 | `key_vault_store_account_connection_string` | Also store the account level connection string | `bool` | `false` |
 | `mongo_server_version` | MongoDB server version | `string` | `"7.0"` |
 | `additional_capabilities` | Extra Cosmos DB capabilities | `list(string)` | `[]` |
@@ -271,10 +278,6 @@ credential.
 | `database_username` | Username of the database owner |
 | `database_password` | Password of the database owner, sensitive |
 | `connection_string` | MongoDB connection string of the database, sensitive |
-| `managed_identity_name` | Name of the managed identity |
-| `managed_identity_client_id` | Client ID, passed to `DefaultAzureCredential` |
-| `managed_identity_principal_id` | Object ID, for role assignments made elsewhere |
-| `managed_identity_role_definition_name` | Azure role it holds on the account |
 | `key_vault_id` | Resource ID of the Key Vault |
 | `key_vault_name` | Name of the Key Vault |
 | `key_vault_uri` | URI of the Key Vault |
