@@ -16,6 +16,7 @@ variables.tf       inputs
 outputs.tf         connection string, secret names, resource IDs
 versions.tf        Terraform and provider constraints
 prototype.tfvars   the prototype environment
+TROUBLESHOOTING.md what to check when access is wider or narrower than expected
 ```
 
 ## Usage
@@ -290,6 +291,19 @@ credential.
 | `key_vault_password_secret_name` | Name of the password secret |
 | `key_vault_connection_string_secret_name` | Name of the connection string secret |
 | `primary_mongodb_connection_string` | Account level connection string, sensitive |
+
+## Troubleshooting
+
+[`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) covers what to check when the access
+a credential has is not the access it should have, how to verify that Mongo
+RBAC is enabled on the live account, and how to probe the effective permissions
+with the Azure CLI, `mongosh`, a driver and the diagnostic logs.
+
+One thing to know before cherry-picking these resources into an existing
+configuration: capabilities cannot be changed through Azure Resource Manager on
+an account that already exists, so Terraform can plan and apply
+`EnableMongoRoleBasedAccessControl` onto an existing account without the account
+actually gaining it. Verify with `az cosmosdb show` rather than with the plan.
 
 ## Requirements
 

@@ -26,7 +26,8 @@ databases in one cluster share one trust boundary.
 the data plane at all: the engine accepts `SCRAM-SHA-256` and nothing else. It
 creates one database with a password and keeps the password in a Key Vault. An
 identity can read the password out of the vault, which is as close to workload
-identity as that model gets.
+identity as that model gets. Its access model has the most ways to go wrong, so
+it carries a [troubleshooting guide](ru/TROUBLESHOOTING.md).
 
 Both Entra ID variants come from [Azure Verified Modules][avm].
 
